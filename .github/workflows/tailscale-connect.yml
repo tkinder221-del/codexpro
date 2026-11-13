@@ -1,0 +1,45 @@
+name: Tailscale connectivity
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Optional Tailscale IP or MagicDNS hostname to test (leave empty to check connection only)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  connect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Verify Tailscale OAuth secrets
+        env:
+          TS_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          TS_CLIENT_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
+        run: |
+          if [[ -z "$TS_CLIENT_ID" || -z "$TS_CLIENT_SECRET" ]]; then
+            echo 'Missing TS_OAUTH_CLIENT_ID or TS_OAUTH_SECRET. Add both in repository Settings > Secrets and variables > Actions.' >&2
+            exit 1
+          fi
+      - name: Connect to tailnet
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+      - name: Check connection
+        run: tailscale status
+      - name: Verify optional target
+        if: ${{ inputs.target != '' }}
+        env:
+          TARGET: ${{ inputs.target }}
+        run: |
+          if [[ ! "$TARGET" =~ ^[a-zA-Z0-9.:-]+$ ]]; then
+            echo 'Target must be a Tailscale IP or DNS hostname.' >&2
+            exit 1
+          fi
+          tailscale ping --c=3 "$TARGET"
