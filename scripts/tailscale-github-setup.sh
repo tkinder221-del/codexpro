@@ -10,7 +10,13 @@ export GH_PROMPT_DISABLED=1
 
 if [[ ${EUID} -eq 0 ]]; then
   if id ubuntu &>/dev/null && sudo -u ubuntu gh auth status &>/dev/null; then
-    exec sudo -u ubuntu bash "$0" "$@"
+    # /root is private; copy to an accessible temporary directory first.
+    temp_dir=$(mktemp -d /tmp/codexpro-ts-setup.XXXXXXXX)
+    chmod 755 "$temp_dir"
+    install -m 755 "$0" "$temp_dir/setup.sh"
+    trap 'rm -rf "$temp_dir"' EXIT
+    sudo -u ubuntu bash "$temp_dir/setup.sh" "$@"
+    exit $?
   fi
   echo 'Uruchom skrypt jako uzytkownik zalogowany w GitHub CLI (np. ubuntu).' >&2
   exit 1
