@@ -578,6 +578,10 @@ const FULL_TOOL_NAMES = [
 ] as const;
 
 const CONNECTION_TEST_HIDDEN_TOOLS = new Set<string>([
+  "integration_record",
+  "skill_create",
+  "skill_record",
+  "knowledge_remember",
   SUPERTOOL_NAME,
   "codexpro_self_test",
   "write",
