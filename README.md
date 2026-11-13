@@ -11,8 +11,8 @@
 <p align="center">
   <a href="https://github.com/tkinder221-del/codexpro/actions"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/PracticalSwan/codexpro/ci.yml?branch=main&style=flat-square"></a>
   <a href="https://github.com/tkinder221-del/codexpro/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/github/license/PracticalSwan/codexpro?style=flat-square"></a>
-  <img alt="Planned release 0.34.1" src="https://img.shields.io/badge/planned-0.34.1-2563eb?style=flat-square">
-  <img alt="Main 0.34.1" src="https://img.shields.io/badge/main-0.34.1-0f766e?style=flat-square">
+  <img alt="Planned release 0.34.2" src="https://img.shields.io/badge/planned-0.34.2-2563eb?style=flat-square">
+  <img alt="Main 0.34.2" src="https://img.shields.io/badge/main-0.34.2-0f766e?style=flat-square">
 </p>
 
 ## Project status
@@ -22,8 +22,8 @@
 ```text
 Distribution fork: https://github.com/tkinder221-del/codexpro
 Upstream:       https://github.com/rebel0789/codexpro
-Next release:   0.34.1
-Current main:   0.34.1 (pending publication)
+Next release:   0.34.2
+Current main:   0.34.2 (pending publication)
 ```
 
 CodexPro Full uses the independent distribution package **`codexpro-full`** while preserving the installed CLI command **`codexpro`**, MCP protocol, profiles, and workspace model. **GitHub Releases are the canonical public release channel.** The upstream npm package `codexpro` is a different distribution; the `codexpro-full` npm registry package is not published yet.
@@ -79,11 +79,11 @@ CodexPro Full is not a hosted SaaS service, model proxy, quota bypass, account p
 ### From the GitHub Release
 
 ```bash
-npm install -g https://github.com/tkinder221-del/codexpro/releases/download/v0.34.1/codexpro-full-0.34.1.tgz
+npm install -g https://github.com/tkinder221-del/codexpro/releases/download/v0.34.2/codexpro-full-0.34.2.tgz
 codexpro --version
 ```
 
-After publication, this installs the GitHub Release **0.34.1** artifact. It includes the 0.33.9 operator usability updates and retires obsolete configurable per-tool-call deadlines. Existing bounded command/network safeguards, processes, verification jobs, resumable batches, and Goals remain. Hosted Windows/Node 24, Ubuntu/Node 20, and tag-triggered release checks passed. Start the runtime manually.
+After publication, this installs the GitHub Release **0.34.2** artifact. It includes the 0.33.9 operator usability updates and retires obsolete configurable per-tool-call deadlines. Existing bounded command/network safeguards, processes, verification jobs, resumable batches, and Goals remain. Hosted Windows/Node 24, Ubuntu/Node 20, and tag-triggered release checks passed. Start the runtime manually.
 
 ### From a source checkout
 
@@ -94,7 +94,7 @@ git checkout main
 npm install
 npm run build
 npm pack
-npm install -g ./codexpro-full-0.34.1.tgz
+npm install -g ./codexpro-full-0.34.2.tgz
 codexpro --version
 ```
 

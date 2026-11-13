@@ -1,6 +1,6 @@
 {
   "name": "codexpro-full",
-  "version": "0.34.1",
+  "version": "0.34.2",
   "description": "CodexPro Full: PracticalSwan's local MCP bridge for full ChatGPT coding workflows on explicitly allowed repos.",
   "type": "module",
   "license": "MIT",
@@ -107,12 +107,12 @@
   },
   "dependencies": {
     "@modelcontextprotocol/client": "^2.0.0",
-    "@modelcontextprotocol/node": "^2.0.0",
+    "@modelcontextprotocol/node": "^2.1.2",
     "@modelcontextprotocol/server": "^2.0.0",
     "chardet": "^2.2.0",
     "express": "^5.1.0",
     "iconv-lite": "^0.7.3",
-    "minimatch": "^10.0.1",
+    "minimatch": "^11.0.8",
     "zod": "^4.5.4"
   },
   "devDependencies": {
@@ -121,5 +121,8 @@
     "tsx": "^4.20.3",
     "typescript": "^5.8.3"
   },
-  "author": "PracticalSwan"
+  "author": "PracticalSwan",
+  "overrides": {
+    "@hono/node-server": "^2.1.8"
+  }
 }
