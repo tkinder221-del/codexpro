@@ -2,7 +2,7 @@
 
 ## What is CodexPro Full?
 
-CodexPro Full is the independently maintained `PracticalSwan/codexpro` fork. It preserves the `codexpro` CLI, MCP protocol, profile format, and upstream MIT lineage, but maintains its own 0.31-0.32 feature line including durable operations, process/event continuity, repository intelligence, optional CodeGraph/LSP integration, artifact I/O, guarded Git writes, and Durable Goals.
+CodexPro Full is the independently maintained `PracticalSwan/codexpro` fork. It preserves the `codexpro` CLI, MCP protocol, profile format, and upstream MIT lineage, but maintains its own 0.31-0.33 feature line including durable operations, process/event continuity, repository intelligence, optional CodeGraph/LSP integration, artifact I/O, guarded Git writes, and Durable Goals.
 
 Canonical fork: `https://github.com/PracticalSwan/codexpro`
 
@@ -35,6 +35,42 @@ The main differences are:
 - Durable context is repo-backed through `AGENTS.md` and `.ai-bridge/*`, so important project memory stays reviewable in files.
 - The normal workflow emphasizes diffs, `show_changes`, smoke tests, and handoff status files.
 - CodexPro keeps a strict boundary: no model proxying, account pooling, third-party Pro site scraping, quota bypassing, or OS sandbox claims.
+
+## What changed in release 0.34.0?
+
+0.34.0 includes the 0.33.9 setup improvements: cleaner authenticated /setup, relevant tunnel controls, reliable Save/Discard handling, and correct OpenAI Tunnel ID guidance. It also retires configurable per-tool-call deadlines and `tool_time_probe` while retaining operation-specific timeouts, jobs, processes, and other safety controls. CI skips documentation-only edits and removes duplicate Goal test executions.
+
+## What changed in the 0.33.8 maintenance release?
+
+An ownership-verified external `codexpro stop` now removes the exact OpenAI tunnel health scratch directory after the launcher/server tree exits. This closes a Windows cleanup leak caused when forceful process-tree termination bypasses launcher exit hooks. The stored path is accepted only when it is a real, non-symlink `codexpro-openai-tunnel-*` directory directly under the OS temp root; tunnel recovery refreshes it, transient Windows deletion locks are retried, and invalid/non-owned paths are never deleted.
+
+## What changed in the 0.33.7 maintenance release?
+
+OpenAI tunnel leases now use launcher start identity so a reused Windows PID cannot falsely block a later manual launch. Local handoff execution also settles after the direct child exits when descendants retain inherited output handles, while preserving timeout/interruption process-tree safeguards. Generated handoff plans no longer ask agents to write the runner-owned execution log. The release gate now clean-installs the packed tarball and verifies all shipped CLI entrypoints, and compatible dependency updates clear the current high-severity audit finding.
+
+## What changed in the 0.33.6 maintenance release?
+
+When a verified launcher exits before its MCP server child finishes shutting down, `codexpro stop` now waits up to five seconds for the child before clearing runtime state. A Windows regression reproduced the previous false failure and verifies the bounded fix. PID/start-identity safeguards and fail-closed behavior are unchanged.
+
+## What changed in the 0.33.5 maintenance release?
+
+Git-aware workspace inspection excludes ignored generated dependencies while retaining explicitly tracked ignored files and legitimate untracked sources. CLI help now uses the version-matched CodexPro Full GitHub Release URL, not the unrelated npm package. Windows stress fixtures are removed with bounded cleanup and phase markers; Ubuntu CI/release runners are pinned to 24.04.
+
+## What changed in the 0.33.4 maintenance release?
+
+Structured Job and Durable Goal persistence now retry temporary Windows atomic-rename failures within a bounded five-second window. Longer exclusive-file-lock regression tests protect the hosted Windows build. Unrelated errors still fail immediately, and the fix does not change permissions, cancellation, worker ownership, or live runtime lifecycle.
+
+## What changed in the 0.33.3 maintenance release?
+
+`codexpro doctor` now reports an existing identity-verified runtime for the same workspace and port as a warning rather than a false startup blocker. It explicitly warns against launching a second instance. Genuine or stale port conflicts remain failures; this diagnostic change does not start, stop, or reconfigure any runtime.
+
+## What changed in the 0.33.2 maintenance release?
+
+Artifact Export diagnostics now check the actual `export_file` registration. Local Service Probe remains package-default-off; a user may persist an opt-in for their own future profiles via `codexpro settings user-default --local-service-probe on`, while individual workspaces can override it with `codexpro settings set --local-service-probe off`. Existing profiles are not automatically migrated for other users.
+
+## What is included in the 0.33.0 feature release?
+
+Release 0.33.0 includes bounded runtime/build provenance and guarded local status/stop commands, deterministic capability/profile diagnostics, provider-backed symbol context, read-only notebook/table/dependency evidence, workspace briefings, and verification failure context. `probe_local_service` is a separate default-off Full-mode capability limited to one explicit loopback HTTP GET/HEAD request. It never follows redirects, sends credentials, or claims that the target listener belongs to the selected workspace. Generic `node_modules` access remains blocked; only the exact declared-dependency inspector has a containment-checked exception.
 
 CodexPro connects ChatGPT to a user-approved local repository over MCP. Repository access, command permissions, and change review remain explicit.
 
@@ -83,10 +119,10 @@ For the full first-time setup, OpenAI tunnel/key steps, and multi-project exampl
 Install the latest tagged/stable artifact directly from GitHub Releases:
 
 ```bash
-npm install -g https://github.com/PracticalSwan/codexpro/releases/download/v0.32.4/codexpro-full-0.32.4.tgz
+npm install -g https://github.com/PracticalSwan/codexpro/releases/download/v0.34.0/codexpro-full-0.34.0.tgz
 ```
 
-Stable **0.32.4 includes the long-lived OpenAI tunnel heartbeat/child recovery and the current continuity/isolation fixes.** If later fixes are listed under **Unreleased** before the next tag, build current `main` from source when you specifically need them:
+Stable **0.34.0** includes the verified Plans 38?46 plus released Plans 47?48, 0.33.9 usability and dependency improvements, and previous Windows/tunnel fixes. The official release tarball is available on GitHub; build main only for later unreleased changes.
 
 ```bash
 git clone https://github.com/PracticalSwan/codexpro.git
@@ -95,7 +131,7 @@ git checkout main
 npm install
 npm run build
 npm pack
-npm install -g ./codexpro-full-0.32.4.tgz
+npm install -g ./codexpro-full-0.34.0.tgz
 ```
 
 Then run setup from the repository you want ChatGPT to work on:
@@ -123,7 +159,7 @@ git pull origin main
 npm install
 npm run build
 npm pack
-npm install -g ./codexpro-full-0.32.4.tgz
+npm install -g ./codexpro-full-0.34.0.tgz
 codexpro --version
 ```
 
@@ -368,21 +404,6 @@ Official references:
 - Cloudflare Tunnel routing: https://developers.cloudflare.com/tunnel/routing/
 - Cloudflare Tunnel DNS records: https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/routing-to-tunnel/dns/
 
-## How does Telegram continuation work?
-
-**Status: experimental / incomplete.** The implementation is installed but final fresh-session installed-runtime acceptance is deferred; keep it disabled unless intentionally testing it.
-
-Telegram continuation is optional and disabled by default. It requires task continuation to be enabled first, one dedicated Telegram bot, and one explicitly paired private chat. Save the bot token only through the masked local `codexpro continuation telegram token save` command or the protected environment override; workspace profiles store only the non-secret enable preference.
-
-When a task is genuinely continuation-ready, CodexPro can send one privacy-safe Telegram notice with **Continue** and up to three bounded focused intents. The buttons contain only opaque one-shot action tokens and remain available for up to five hours. If the browser temporarily becomes unsafe and the task later returns ready within the same semantic continuation opportunity, CodexPro refreshes that existing Telegram message's buttons instead of sending another notice. A valid click still cannot bypass task revision/nonce checks, terminal/manual-turn state, current transport, productive durable work, the paired managed browser, the exact bound ChatGPT route, sign-in, streaming/busy state, composer availability, or recent user input. A successful click creates only a <=30-second local dispatch grant. Telegram never supplies an arbitrary ChatGPT message body; the browser can submit only CodexPro's fixed continuation text.
-
-Use `codexpro continuation telegram doctor` for sanitized health, `telegram test` for a fixed test notification, `telegram disable` to stop new Telegram authorizations while preserving browser Continue, and `telegram revoke` to invalidate the paired private identity and outstanding Telegram actions without canceling the continuation task. A webhook conflict, blocked bot, or Telegram outage fails closed and leaves the browser path available without automatic sending.
-
-## Does task continuation scrape or autonomously drive ChatGPT?
-
-No. Task continuation observes only coarse page/auth/composer capability state in a dedicated CodexPro-managed browser profile. It does not read conversation output, execute arbitrary DOM scripts, use your ordinary browser profile, automate login/2FA/passkeys, click approvals or safety controls, switch models, auto-Retry, or attempt to bypass rate limits/tool windows. Every continuation send remains a fixed product message authorized by a current browser or exactly paired Telegram user action and revalidated against the current task revision, route, runtime transport, and page-safety state.
-
-For release/operator validation, use `scripts/continuation-live-checklist.md`. After the intended build is installed, use `scripts/continuation-fresh-session-checklist.md` from a new ChatGPT conversation and copy back only its sanitized report fields. Do not include bot/browser tokens, Telegram numeric IDs, cookies/storage, account email, full private conversation URLs, prompt/output text, or secret-bearing commands.
 ## Can I keep the same ChatGPT connection every day?
 
 Yes. With the default OpenAI Secure MCP Tunnel path, keep the same Platform tunnel ID assigned to the same ChatGPT workspace and save that non-secret ID in the CodexPro workspace profile. Daily startup remains:

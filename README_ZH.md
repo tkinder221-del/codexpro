@@ -11,8 +11,8 @@
 <p align="center">
   <a href="https://github.com/PracticalSwan/codexpro/actions"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/PracticalSwan/codexpro/ci.yml?branch=main&style=flat-square"></a>
   <a href="https://github.com/PracticalSwan/codexpro/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/github/license/PracticalSwan/codexpro?style=flat-square"></a>
-  <img alt="Stable release 0.32.4" src="https://img.shields.io/badge/stable-0.32.4-2563eb?style=flat-square">
-  <img alt="Main post-0.32.4 / Unreleased" src="https://img.shields.io/badge/main-Unreleased-0f766e?style=flat-square">
+  <img alt="Stable release 0.33.8" src="https://img.shields.io/badge/stable-0.33.8-2563eb?style=flat-square">
+  <img alt="Main 0.33.9" src="https://img.shields.io/badge/main-0.33.9-0f766e?style=flat-square">
 </p>
 
 <p align="center">
@@ -27,9 +27,9 @@
 
 ## CodexPro Full fork status
 
-`PracticalSwan/codexpro` is the canonical independently maintained fork. It preserves the `codexpro` CLI/MCP/profile compatibility surface while maintaining the 0.31-0.32 feature line. Upstream remains `rebel0789/codexpro` under the existing MIT lineage.
+`PracticalSwan/codexpro` is the canonical independently maintained fork. It preserves the `codexpro` CLI/MCP/profile compatibility surface while maintaining the 0.31-0.33 feature line. Upstream remains `rebel0789/codexpro` under the existing MIT lineage.
 
-稳定发布版是 **0.32.4**；当前 `main` 已进入 post-0.32.4 的 **Unreleased** 维护阶段。0.32.4 已包含长时间 OpenAI Tunnel 自动恢复、Windows continuity hardening、128-session 容量和 tunnel lease 保护；后续 `main` 还包含已验证但尚未打 tag 的维护修复。
+目前已发布的稳定版是 **0.33.8**。main 分支上的 **0.33.9** 尚未正式发布，已改进本地 `/setup` 状态与设置页面，并更新兼容依赖。0.33.8 保留已经验证的 Tunnel 临时目录清理及此前的维护修复。
 
 CodexPro Full uses the independent distribution package **`codexpro-full`** while the installed CLI remains **`codexpro`**. GitHub Releases are the canonical public release channel. The upstream npm package `codexpro@latest` is not this fork, and `codexpro-full` is not yet published to npm.
 
@@ -46,11 +46,11 @@ ChatGPT 可以读取、搜索、编辑、审查、验证、导入附件，并写
 GitHub Release:
 
 ```bash
-npm install -g https://github.com/PracticalSwan/codexpro/releases/download/v0.32.4/codexpro-full-0.32.4.tgz
+npm install -g https://github.com/PracticalSwan/codexpro/releases/download/v0.33.8/codexpro-full-0.33.8.tgz
 codexpro --version
 ```
 
-上面的 tarball 是稳定版 0.32.4，并已包含 Tunnel heartbeat / child recovery。只有在明确需要 `CHANGELOG.md` 中 0.32.4 之后新增的 **Unreleased** 项目时，才从当前 `main` 构建。
+目前已发布的稳定版是 **0.33.8**。main 分支上的 **0.33.9** 尚未正式发布，已改进本地 `/setup` 状态与设置页面，并更新兼容依赖。0.33.8 保留已经验证的 Tunnel 临时目录清理及此前的维护修复。
 
 Source build:
 
@@ -67,7 +67,7 @@ git checkout main
 npm install
 npm run build
 npm pack
-npm install -g ./codexpro-full-0.32.4.tgz
+npm install -g ./codexpro-full-0.33.9.tgz
 codexpro --version
 ```
 
@@ -198,7 +198,7 @@ git pull origin main
 npm install
 npm run build
 npm pack
-npm install -g ./codexpro-full-0.32.4.tgz
+npm install -g ./codexpro-full-0.33.9.tgz
 codexpro --version
 ```
 

@@ -1,0 +1,39 @@
+name: Publish npm package
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing verified release tag (for example v0.34.1)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Validate tag and package version
+        shell: bash
+        run: |
+          expected="v$(node -p "require('./package.json').version")"
+          test "${{ inputs.tag }}" = "$expected"
+          git tag --points-at HEAD | grep -Fx "$expected"
+      - run: npm ci
+      - run: npm run release:guard
+      - run: npm run build
+      - run: npm run smoke
+      - name: Publish to npm
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

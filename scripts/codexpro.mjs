@@ -20,11 +20,8 @@ import { resolveOpenAiRuntimeKey, runOpenAiKeyCommand } from './openai-key-store
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const UNTRACKED_FILE_HASH_BYTES = 64 * 1024;
 const UNTRACKED_SYMLINK_TARGET_BYTES = 512;
-const DEFAULT_SYNC_CALL_DEADLINE_MS = 1_200_000;
-const MIN_SYNC_CALL_DEADLINE_MS = 300_000;
-const MAX_SYNC_CALL_DEADLINE_MS = 3_600_000;
-const OPENAI_TUNNEL_CONNECTION_TTL_MARGIN_MS = 300_000;
-const OPENAI_TUNNEL_CONNECTION_MAX_TTL = `${(MAX_SYNC_CALL_DEADLINE_MS + OPENAI_TUNNEL_CONNECTION_TTL_MARGIN_MS) / 60_000}m`;
+// Independent finite tunnel transport TTL, not an MCP call deadline.
+const OPENAI_TUNNEL_CONNECTION_MAX_TTL = "65m";
 const DEFAULT_OPENAI_TUNNEL_HEARTBEAT_MS = 30_000;
 const OPENAI_TUNNEL_HEARTBEAT_FAILURE_THRESHOLD = 3;
 const OPENAI_TUNNEL_RECOVERY_MAX_BACKOFF_MS = 30_000;
@@ -33,21 +30,53 @@ function packageVersion() {
   return JSON.parse(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8')).version;
 }
 
+function buildIdentity() {
+  const packageJson = JSON.parse(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8'));
+  const candidates = [path.join(projectRoot, 'dist', 'build-metadata.json'), path.join(projectRoot, 'build-metadata.json')];
+  for (const candidate of candidates) {
+    try {
+      const metadata = JSON.parse(fs.readFileSync(candidate, 'utf8'));
+      const revision = /^[0-9a-f]{7,64}$/i.test(String(metadata?.revision ?? '')) ? String(metadata.revision) : null;
+      const channel = revision && ['release', 'main', 'source'].includes(metadata?.channel) ? metadata.channel : 'unknown';
+      return { packageName: packageJson.name, version: packageJson.version, revision, channel };
+    } catch {}
+  }
+  return { packageName: packageJson.name, version: packageJson.version, revision: null, channel: 'unknown' };
+}
+
+function displayVersion(identity = buildIdentity()) {
+  return identity.revision && ['main', 'source'].includes(identity.channel)
+    ? `${identity.version}+${identity.channel}.${identity.revision.slice(0, 12)}`
+    : identity.version;
+}
+
 function isLoopbackHost(host) {
   return host === '127.0.0.1' || host === 'localhost' || host === '::1';
 }
 
 function usage() {
-  console.log(`CodexPro easy launcher
+  const version = packageVersion();
+  const publishedVersion = buildIdentity().channel === "release" ? version : "0.34.0";
+  console.log(`CodexPro Full launcher
+
+Install previously verified public stable release:
+  npm install -g https://github.com/PracticalSwan/codexpro/releases/download/v${publishedVersion}/codexpro-full-${publishedVersion}.tgz
+
+When CodexPro Full v${version} has passed hosted CI and is publicly released:
+  npm install -g https://github.com/PracticalSwan/codexpro/releases/download/v${version}/codexpro-full-${version}.tgz
+
+Available releases: https://github.com/PracticalSwan/codexpro/releases
 
 Usage:
-  npm install -g codexpro
   codexpro setup
   codexpro start
   codexpro start --root /path/to/repo
   codexpro start --tunnel openai --openai-tunnel-id tunnel_...
-  codexpro continuation browser pair --profile default
   codexpro settings
+  codexpro settings user-default --local-service-probe on|off
+  codexpro profiles list|show
+  codexpro status [--root /path/to/repo] [--json]
+  codexpro stop [--root /path/to/repo] [--json]
   codexpro doctor
   codexpro connection-test --root /path/to/repo
   codexpro inspect --root /path/to/repo [--json]
@@ -88,9 +117,6 @@ Options:
   --host <host>             Local bind host. Default: 127.0.0.1.
   --port <port>             Local port. Default: 8787.
   --bash <off|safe|full>    Bash mode. Default: safe.
-  --sync-call-deadline-minutes <5-60|unlimited>
-                             Tool-call transport deadline. Default: 20 minutes. Unlimited is observe-only discovery mode; it does not extend ChatGPT tool access or reduce task-quality requirements.
-                             Discovery: in a disposable chat, manually start an Unlimited/observe runtime, call only tool_time_probe, record the UI cutoff, then restore a bounded value with safety margin.
   --no-bash                 Shortcut for --bash off.
   --bash-transcript <compact|full>
                              Chat transcript for bash results. Default: compact.
@@ -118,6 +144,8 @@ Options:
   --tool-cards <on|off>      Opt in to ChatGPT widget metadata on tool descriptors. Default: off.
   --analysis <on|off>        Enable built-in repository analysis. Default: on.
   --artifact-export <on|off> Enable export_file. Default: off unless saved.
+  --local-service-probe <on|off>
+                             Enable the default-off Full-mode loopback GET/HEAD probe.
   --goals <on|off>           Enable Durable Goal tools. Default: off unless saved.
   --codegraph <on|off>       Enable optional CodeGraph integration. Default: off unless saved.
   --lsp <on|off>             Enable configured LSP integration. Default: off.
@@ -220,6 +248,7 @@ Workspace settings:
   codexpro settings list
   codexpro settings set --tunnel ngrok --hostname your-domain.ngrok-free.dev
   codexpro settings set --project /path/to/another/repo
+  codexpro settings user-default --local-service-probe on|off
   codexpro settings set --clear-projects
   codexpro settings use
   codexpro settings delete --yes
@@ -356,6 +385,7 @@ function parseArgs(argv) {
     const option = raw.slice(2);
     const eq = option.indexOf('=');
     const key = eq >= 0 ? option.slice(0, eq) : option;
+    if (key.startsWith('sync-call-deadline')) throw new Error('Synchronous tool-call deadline options were removed in 0.34.0. Remove this flag; use explicit operation timeouts and durable jobs.');
     const inlineValue = eq >= 0 ? option.slice(eq + 1) : undefined;
     if (key === 'help') out.help = true;
     else if (key === 'allow-home') out.allowHome = true;
@@ -369,6 +399,8 @@ function parseArgs(argv) {
     else if (key === 'no-copy-url') out.noCopyUrl = true;
     else if (key === 'dry-run') out.dryRun = true;
     else if (key === 'json') out.json = true;
+    else if (key === 'current') out.current = true;
+    else if (key === 'verbose') out.verbose = true;
     else if (key === 'staged') out.staged = true;
     else if (key === 'once') out.once = true;
     else if (key === 'confirm') out.confirm = true;
@@ -410,7 +442,7 @@ function parseArgs(argv) {
       if (inlineValue === undefined) i += 1;
       if (key === 'allow-root' || key === 'project') out.allowRoots.push(value);
       else {
-        const aliases = { analysis: 'analysisEnabled', 'artifact-export': 'artifactExportEnabled', goals: 'goalsEnabled', codegraph: 'codeGraphEnabled', lsp: 'lspEnabled', 'allow-git-push': 'allowGitPush', 'inherit-env': 'inheritEnv' };
+        const aliases = { analysis: 'analysisEnabled', 'artifact-export': 'artifactExportEnabled', 'local-service-probe': 'localServiceProbeEnabled', goals: 'goalsEnabled', codegraph: 'codeGraphEnabled', lsp: 'lspEnabled', 'allow-git-push': 'allowGitPush', 'inherit-env': 'inheritEnv' };
         out[aliases[key] ?? key.replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = value;
       }
     }
@@ -738,24 +770,24 @@ function codexProHome() {
   return customHome ? path.resolve(expandHome(customHome)) : path.join(os.homedir(), '.codexpro');
 }
 
-function continuationProcessAlive(pid) {
+function runtimeProcessAlive(pid) {
   if (!Number.isInteger(Number(pid)) || Number(pid) <= 0) return false;
   try { process.kill(Number(pid), 0); return true; }
   catch (error) { return error?.code === 'EPERM'; }
 }
 
-function sameContinuationRoot(left, right) {
-  const a = path.resolve(String(left ?? ''));
-  const b = path.resolve(String(right ?? ''));
-  return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
-}
-
-function liveRuntimeConnection(root) {
-  const runtime = readJsonFile(runtimeStatusPathForRoot(root));
-  if (!runtime || !Object.keys(runtime).length || (runtime.root && !sameContinuationRoot(runtime.root, root))) return null;
-  if (!continuationProcessAlive(runtime.pid)) return null;
-  if (runtime.runtimePid && !continuationProcessAlive(runtime.runtimePid)) return null;
-  return runtime;
+function processStartIdentity(pid) {
+  const numericPid = Number(pid);
+  if (!Number.isInteger(numericPid) || numericPid <= 0) return null;
+  if (process.platform === 'win32') {
+    const command = `$p=Get-Process -Id ${numericPid} -ErrorAction Stop; $p.StartTime.ToUniversalTime().Ticks`;
+    const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], { encoding: 'utf8', timeout: 3000, windowsHide: true });
+    const value = String(result.stdout || '').trim();
+    return result.status === 0 && /^\d+$/.test(value) ? `win:${value}` : null;
+  }
+  const result = spawnSync('ps', ['-o', 'lstart=', '-p', String(numericPid)], { encoding: 'utf8', timeout: 3000, windowsHide: true });
+  const value = String(result.stdout || '').trim();
+  return result.status === 0 && value ? `${process.platform}:${value}` : null;
 }
 
 let activeOpenAiTunnelLeasePath = '';
@@ -777,7 +809,15 @@ function releaseOpenAiTunnelLease() {
 function acquireOpenAiTunnelLease(tunnelId, root, port) {
   const filePath = openAiTunnelLeasePath(tunnelId);
   fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
-  const payload = { version: 1, tunnelId, pid: process.pid, root, port: String(port), createdAt: new Date().toISOString() };
+  const payload = {
+    version: 1,
+    tunnelId,
+    pid: process.pid,
+    pidStartKey: processStartIdentity(process.pid),
+    root,
+    port: String(port),
+    createdAt: new Date().toISOString()
+  };
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
       const fd = fs.openSync(filePath, 'wx', 0o600);
@@ -803,15 +843,23 @@ function acquireOpenAiTunnelLease(tunnelId, root, port) {
       }
       const existingPid = Number(existing?.pid);
       const ownerRoot = typeof existing?.root === 'string' && existing.root ? existing.root : '';
+      const existingAlive = runtimeProcessAlive(existingPid);
+      const livePidStartKey = existingAlive ? processStartIdentity(existingPid) : null;
       let matchingRuntime = false;
-      if (ownerRoot && continuationProcessAlive(existingPid)) {
+      if (ownerRoot && existingAlive) {
         try {
           const runtime = readJsonFile(runtimeStatusPathForRoot(ownerRoot));
-          matchingRuntime = Number(runtime?.pid) === existingPid && runtime?.tunnel === 'openai' && runtime?.endpoint === tunnelId;
+          const runtimeIdentityMatches = typeof runtime?.pidStartKey !== 'string' ||
+            !livePidStartKey || livePidStartKey === runtime.pidStartKey;
+          matchingRuntime = Number(runtime?.pid) === existingPid &&
+            runtimeIdentityMatches &&
+            runtime?.tunnel === 'openai' && runtime?.endpoint === tunnelId;
         } catch {}
       }
       const createdMs = Date.parse(String(existing?.createdAt ?? ''));
-      const recentlyAcquired = continuationProcessAlive(existingPid) && Number.isFinite(createdMs) && Date.now() - createdMs < 300_000;
+      const leaseIdentityMatches = typeof existing?.pidStartKey !== 'string' ||
+        !livePidStartKey || livePidStartKey === existing.pidStartKey;
+      const recentlyAcquired = existingAlive && leaseIdentityMatches && Number.isFinite(createdMs) && Date.now() - createdMs < 300_000;
       if (matchingRuntime || recentlyAcquired) {
         const ownerLabel = ownerRoot || 'another workspace';
         const ownerPort = existing?.port ? ` on local port ${existing.port}` : '';
@@ -823,400 +871,28 @@ function acquireOpenAiTunnelLease(tunnelId, root, port) {
   throw new Error(`Could not acquire the OpenAI tunnel lease for ${tunnelId}. Retry after the other CodexPro launcher exits.`);
 }
 
-function continuationDeadlineLabel(mode, milliseconds) {
-  if (mode === 'observe') return 'Unlimited (observe only)';
-  const value = Number(milliseconds);
-  return Number.isFinite(value) && value > 0 ? `${Math.round(value / 60_000)} min` : 'unavailable';
-}
-
-async function printContinuationCliStatus(root, settings) {
-  const homeDir = codexProHome();
-  const continuationRoot = path.join(homeDir, 'continuation');
-  const runtime = liveRuntimeConnection(root);
-  const typesUrl = pathToFileURL(path.join(projectRoot, 'dist', 'continuation', 'types.js')).href;
-  const storeUrl = pathToFileURL(path.join(projectRoot, 'dist', 'continuation', 'store.js')).href;
-  const profileUrl = pathToFileURL(path.join(projectRoot, 'dist', 'continuation', 'browserProfile.js')).href;
-  const launcherUrl = pathToFileURL(path.join(projectRoot, 'dist', 'continuation', 'browserLauncher.js')).href;
-  const authUrl = pathToFileURL(path.join(projectRoot, 'dist', 'continuation', 'browserAuth.js')).href;
-  const [{ TERMINAL_CONTINUATION_STATES }, { ContinuationStore }, profileModule, launcherModule, { BrowserPairingStore }] = await Promise.all([
-    import(typesUrl), import(storeUrl), import(profileUrl), import(launcherUrl), import(authUrl)
-  ]);
-  let records = [];
-  if (fs.existsSync(path.join(continuationRoot, 'records'))) {
-    const store = new ContinuationStore(continuationRoot, 128);
-    records = (await store.list()).filter((record) => sameContinuationRoot(record.workspaceRoot, root));
-  }
-  const active = records.filter((record) => !TERMINAL_CONTINUATION_STATES.has(record.state));
-  const task = active[0] ?? records[0] ?? null;
-  let browserState = { running: false, paired: false, auth_state: 'unknown' };
-  if (settings.continuationEnabled) {
-    const managed = await profileModule.existingManagedBrowserProfile(homeDir, settings.continuationProfile);
-    if (managed) {
-      const pairingRoot = path.join(continuationRoot, 'browser');
-      const clients = fs.existsSync(pairingRoot) ? await new BrowserPairingStore(pairingRoot).listPublicClients() : [];
-      const paired = clients.some((entry) => entry.profile_label === settings.continuationProfile && entry.active === true);
-      browserState = await profileModule.browserProfileStatus({ profile: managed, paired, processIdentity: launcherModule.managedBrowserProcessStartIdentity });
-    }
-  }
-  const savedDeadline = continuationDeadlineLabel(settings.syncCallDeadlineMode ?? 'bounded', settings.syncCallDeadlineMs ?? DEFAULT_SYNC_CALL_DEADLINE_MS);
-  const runtimeDeadline = runtime ? continuationDeadlineLabel(runtime.syncCallDeadlineMode, runtime.syncCallDeadlineMs) : 'unavailable';
-  printBox('CodexPro task continuation', [
-    labelValue('Workspace', root),
-    labelValue('Task continuation', settings.continuationEnabled ? 'enabled (saved next run)' : 'disabled (saved next run)'),
-    labelValue('Current continuation', runtime ? (typeof runtime.continuationEnabled === 'boolean' ? (runtime.continuationEnabled ? 'enabled' : 'disabled') : 'unavailable') : 'unavailable'),
-    labelValue('Saved next run continuation', settings.continuationEnabled ? 'enabled' : 'disabled'),
-    labelValue('Current runtime', runtime ? runtimeDeadline : 'unavailable'),
-    labelValue('Transport', runtime ? 'ready' : 'unavailable'),
-    ...(runtime && runtimeDeadline !== savedDeadline ? [labelValue('Saved next run deadline', savedDeadline)] : []),
-    ...(!runtime ? [labelValue('Saved next run deadline', savedDeadline)] : []),
-    labelValue('Browser setup', settings.continuationEnabled ? 'required when continuation is used' : 'not required'),
-    labelValue('Browser profile', settings.continuationProfile),
-    labelValue('Browser paired', browserState.paired ? 'yes' : 'no'),
-    labelValue('Browser auth', browserState.auth_state ?? 'unknown'),
-    labelValue('Active tasks', String(active.length)),
-    ...(task ? [
-      labelValue('Task', `${task.id.replace(/^continuation_/, '').slice(0, 8)} ${task.title}`),
-      labelValue('Task revision', String(task.revision)),
-      labelValue('Task state', task.state),
-      labelValue('Current phase', task.currentPhase ?? 'not set'),
-      labelValue('Remaining work', String(task.remainingWork.length)),
-      labelValue('Bound chat', task.conversationFingerprint ? 'yes' : 'no'),
-      labelValue('Continuation ready', task.state === 'continuation_ready' ? 'yes' : 'no'),
-      labelValue('Dispatch count', String(task.continuationCount))
-    ] : []),
-    labelValue('Local durable work', 'unknown until runtime integration (Plan 35)')
-  ]);
-}
-
-async function readMaskedTelegramSecret(promptText) {
-  if (!process.stdin.isTTY) throw new Error('Telegram bot token save requires CODEXPRO_TELEGRAM_BOT_TOKEN or an interactive masked prompt.');
-  return new Promise((resolve, reject) => {
-    const input = process.stdin; const output = process.stdout; const wasRaw = Boolean(input.isRaw); let value = '';
-    const cleanup = () => { input.off('data', onData); if (input.setRawMode) input.setRawMode(wasRaw); input.pause(); };
-    const onData = (chunk) => { for (const ch of String(chunk)) {
-      if (ch === '\u0003') { output.write('\n'); cleanup(); reject(new Error('Cancelled.')); return; }
-      if (ch === '\r' || ch === '\n') { output.write('\n'); cleanup(); resolve(value.trim()); return; }
-      if (ch === '\u007f' || ch === '\b') { if (value) { value = value.slice(0, -1); output.write('\b \b'); } }
-      else if (ch >= ' ') { value += ch; output.write('*'); }
-    }};
-    output.write(promptText); input.setEncoding('utf8'); if (input.setRawMode) input.setRawMode(true); input.resume(); input.on('data', onData);
-  });
-}
-
-async function runTelegramTokenCommand(argv) {
-  const action = argv[0] ?? 'status';
-  const parsed = parseArgs(argv.slice(1));
-  if (parsed.token !== undefined || parsed.telegramBotToken !== undefined) throw new Error('Telegram bot token command-line arguments are forbidden; use the masked prompt or CODEXPRO_TELEGRAM_BOT_TOKEN.');
-  if (!['save', 'status', 'clear'].includes(action)) throw new Error('Telegram token supports only: save, status, clear.');
-  const moduleUrl = pathToFileURL(path.join(projectRoot, 'dist', 'continuation', 'telegramSecrets.js')).href;
-  const secrets = await import(moduleUrl); const homeDir = codexProHome();
-  if (action === 'status') {
-    const resolved = secrets.resolveTelegramBotToken(homeDir, process.env);
-    console.log(`Telegram bot token: ${resolved.token ? `configured (${resolved.source})` : 'not configured'}`); return;
-  }
-  if (action === 'save') {
-    const fromEnv = String(process.env.CODEXPRO_TELEGRAM_BOT_TOKEN ?? '').trim();
-    const token = fromEnv || await readMaskedTelegramSecret('Telegram bot token (masked): ');
-    await secrets.saveTelegramBotToken(homeDir, token);
-    console.log('OK Telegram bot token saved to protected per-user storage.'); console.log('   Workspace profiles never store the token value.'); return;
-  }
-  if (!parsed.yes) {
-    if (!process.stdin.isTTY) throw new Error('Use --yes to clear the protected Telegram bot token in non-interactive shells.');
-    const rl = createInterface({ input: process.stdin, output: process.stdout });
-    try { const answer = await ask(rl, 'Clear the protected Telegram bot token?', 'no'); if (!['y','yes'].includes(answer.trim().toLowerCase())) { console.log('Telegram token clear cancelled.'); return; } }
-    finally { rl.close(); }
-  }
-  await secrets.clearTelegramBotToken(homeDir); console.log('OK Protected Telegram bot token file cleared.');
-}
-
-async function runTelegramContinuationCommand(argv) {
-  if ((argv[0] ?? 'status') === 'token') { await runTelegramTokenCommand(argv.slice(1)); return; }
-  const action = argv[0] ?? 'status';
-  if (!['setup', 'pair', 'status', 'test', 'doctor', 'disable', 'revoke'].includes(action)) {
-    throw new Error('Telegram continuation supports: setup, pair, status, test, doctor, disable, revoke, token save|status|clear.');
-  }
-  const parsed = parseArgs(argv.slice(1));
-  const root = realDir(parsed.root ?? process.env.CODEXPRO_ROOT ?? process.cwd());
-  const savedProfile = parsed.noProfile ? {} : loadWorkspaceProfile(root);
-  const settings = await continuationProfileEntries({}, savedProfile);
-  const secretsUrl = pathToFileURL(path.join(projectRoot, 'dist', 'continuation', 'telegramSecrets.js')).href;
-  const pairingUrl = pathToFileURL(path.join(projectRoot, 'dist', 'continuation', 'telegramPairing.js')).href;
-  const stateUrl = pathToFileURL(path.join(projectRoot, 'dist', 'continuation', 'telegramNotifications.js')).href;
-  const runtimeStatusUrl = pathToFileURL(path.join(projectRoot, 'dist', 'continuation', 'telegramStatus.js')).href;
-  const [{ resolveTelegramBotToken }, { TelegramPairingStore }, telegramState, telegramRuntimeStatus] = await Promise.all([
-    import(secretsUrl), import(pairingUrl), import(stateUrl), import(runtimeStatusUrl)
-  ]);
-  const homeDir = codexProHome();
-  const stateDir = path.join(homeDir, 'continuation', 'telegram');
-  const token = resolveTelegramBotToken(homeDir, process.env);
-  const pairingStore = new TelegramPairingStore(stateDir);
-  const paired = await pairingStore.paired();
-  const runtimeDisabled = await telegramState.telegramRuntimeAuthorizationDisabled(stateDir);
-  const runtimeStatus = await telegramRuntimeStatus.readTelegramRuntimeStatus(stateDir);
-
-  if (action === 'disable') {
-    const { profilePath: _profilePath, ...profileValues } = savedProfile;
-    saveWorkspaceProfile(root, { ...profileValues, continuationTelegramEnabled: false });
-    await telegramState.setTelegramRuntimeAuthorizationDisabled(stateDir, true);
-    await telegramState.invalidateTelegramActions(stateDir);
-    await telegramState.invalidateTelegramDispatchGrants(stateDir);
-    console.log('OK Telegram continuation disabled. Browser Continue remains available when task continuation is enabled.');
-    console.log('   Existing Telegram pairing and bot token were preserved. Pending Telegram actions and dispatch grants were invalidated.');
-    return;
-  }
-
-  if (action === 'revoke') {
-    await pairingStore.revoke();
-    await telegramState.invalidateTelegramNotificationState(stateDir);
-    console.log('OK Telegram private-chat authorization revoked.');
-    console.log('   Bot token, browser pairing, continuation tasks, processes, jobs, Goals, runtime, and tunnel were not changed.');
-    return;
-  }
-
-  if (action === 'status') {
-    printBox('CodexPro Telegram continuation', [
-      labelValue('Task continuation', settings.continuationEnabled ? 'enabled' : 'disabled'),
-      labelValue('Telegram continuation', settings.continuationTelegramEnabled ? 'enabled' : 'disabled'),
-      labelValue('Live authorization', runtimeDisabled ? 'disabled' : settings.continuationTelegramEnabled ? 'available when runtime is ready' : 'disabled'),
-      labelValue('Token', token.token ? 'configured' : 'not configured'),
-      labelValue('Bot identity', runtimeStatus.botUsername ? `@${runtimeStatus.botUsername}` : 'not checked'),
-      labelValue('Paired private chat', paired ? 'yes' : 'no'),
-      labelValue('Worker', runtimeStatus.workerState),
-      labelValue('Webhook conflict', runtimeStatus.webhookConflict ? 'yes' : 'no'),
-      labelValue('Last Bot API contact', runtimeStatus.lastSuccessfulContactAt ?? 'none'),
-      labelValue('Notifications', !runtimeDisabled && paired && runtimeStatus.notificationAvailable ? 'available' : 'unavailable')
-    ]);
-    return;
-  }
-
-  if ((action === 'setup' || action === 'pair' || action === 'test') && !settings.continuationEnabled) {
-    console.log('Telegram continuation requires task continuation to be enabled first. No Telegram action was started.');
-    return;
-  }
-  if ((action === 'setup' || action === 'pair' || action === 'test') && !settings.continuationTelegramEnabled) {
-    console.log('Telegram continuation is disabled in saved settings. No Telegram action was started.');
-    return;
-  }
-  if (!token.token) {
-    if (action === 'doctor') {
-      printBox('CodexPro Telegram doctor', [labelValue('Token', 'not configured'), labelValue('Paired private chat', paired ? 'yes' : 'no'), labelValue('Bot API', 'not checked')]);
-      return;
-    }
-    console.log('WAITING_FOR_TELEGRAM_BOT_TOKEN');
-    console.log('Create a dedicated private-control bot with @BotFather, then save its token locally with: codexpro continuation telegram token save');
-    console.log('Do not paste the Telegram bot token into ChatGPT. After saving it locally, return to this conversation and send: continue');
-    return;
-  }
-
-  const clientUrl = pathToFileURL(path.join(projectRoot, 'dist', 'continuation', 'telegramClient.js')).href;
-  const { TelegramBotApiClient } = await import(clientUrl);
-  const client = new TelegramBotApiClient(token.token);
-  const bot = await client.getMe();
-  if (!bot?.is_bot || !/^\w{5,32}$/.test(String(bot?.username ?? ''))) throw new Error('Telegram getMe did not return a usable bot identity.');
-  const botLabel = `@${String(bot.username)}`;
-
-  if (action === 'doctor') {
-    const webhook = await client.getWebhookInfo();
-    let pairingState = paired ? 'paired' : 'not paired';
-    if (paired) {
-      try { await pairingStore.assertBotIdentity(bot.id); }
-      catch { pairingState = 'paired identity mismatch'; }
-    }
-    printBox('CodexPro Telegram doctor', [
-      labelValue('Bot', botLabel),
-      labelValue('Token', 'configured'),
-      labelValue('Paired private chat', pairingState),
-      labelValue('Webhook conflict', String(webhook?.url ?? '').trim() ? 'yes (long polling blocked)' : 'no'),
-      labelValue('Live authorization', runtimeDisabled ? 'disabled' : 'enabled'),
-      labelValue('Bot API', 'reachable')
-    ]);
-    return;
-  }
-
-  if (action === 'test') {
-    if (runtimeDisabled) throw new Error('telegram_disabled: enable Telegram continuation before testing notifications.');
-    if (!paired) throw new Error('Telegram private chat is not paired.');
-    await pairingStore.assertBotIdentity(bot.id);
-    const webhook = await client.getWebhookInfo();
-    if (String(webhook?.url ?? '').trim()) throw new Error('telegram_webhook_conflict: long polling is unavailable while a webhook is configured.');
-    await client.sendMessage({ chat_id: paired.privateChatId, text: 'CodexPro Telegram continuation test: private notification channel is available.', disable_web_page_preview: true });
-    console.log(`OK Telegram continuation test notification sent by ${botLabel}.`);
-    return;
-  }
-
-  if (paired) {
-    await pairingStore.assertBotIdentity(bot.id);
-    console.log('Telegram private chat is already paired to this bot.');
-    return;
-  }
-  if (action === 'pair') {
-    const pairingModule = await import(pairingUrl);
-    const updates = await client.getUpdates({ timeout: 0, allowed_updates: ['message'] });
-    const claimed = await pairingModule.claimPairingFromUpdates(pairingStore, Array.isArray(updates) ? updates : [], bot.id);
-    if (!claimed) {
-      console.log('WAITING_FOR_TELEGRAM_PAIR');
-      console.log('No matching Start update has been received for the active pairing yet. Open the existing pairing link and press Start, then send: continue');
-      return;
-    }
-    console.log('OK Telegram private chat paired successfully.');
-    return;
-  }
-  const pending = await pairingStore.createPairing(bot);
-  const username = String(bot.username);
-  console.log(`Telegram bot: @${username}`);
-  console.log(`Pairing link: https://t.me/${username}?start=${pending.code}`);
-  console.log(`Expires: ${pending.expiresAt}`);
-  console.log('WAITING_FOR_TELEGRAM_PAIR');
-  console.log('Open the pairing link in Telegram and press Start. Do not share the pairing link. Then return here and send: continue');
-}
-
-async function runContinuationCommand(argv) {
-  if (argv.includes('--help') || argv.includes('-h') || argv[0] === 'help') {
-    console.log([
-      'Usage:',
-      '  codexpro continuation status [--root <dir>]',
-      '  codexpro continuation arm-status [--root <dir>]',
-      '  codexpro continuation disarm --task <id|short-id> [--root <dir>]',
-      '  codexpro continuation browser status|pair|open|auth [--profile <label>] [--root <dir>]',
-      '  codexpro continuation browser clear-profile --profile <label> --yes [--root <dir>]',
-      '  codexpro continuation telegram setup|pair|status|test|doctor|disable|revoke [--root <dir>]',
-      '  codexpro continuation telegram token save|status|clear [--yes]',
-      '',
-      'Saved continuation settings are next-run defaults. Status reports current runtime state separately when available.'
-    ].join('\n'));
-    return;
-  }
-  const command = argv[0] ?? 'status';
-  if (!['status', 'arm-status', 'disarm', 'browser', 'telegram'].includes(command)) {
-    throw new Error('Supported continuation commands: status, arm-status, disarm, browser, telegram.');
-  }
-  if (command === 'telegram') { await runTelegramContinuationCommand(argv.slice(1)); return; }
-  const optionStart = command === 'browser' ? 2 : 1;
-  const parsed = parseArgs(argv.slice(optionStart));
-  const root = realDir(parsed.root ?? process.env.CODEXPRO_ROOT ?? process.cwd());
-  const savedProfile = parsed.noProfile ? {} : loadWorkspaceProfile(root);
-  const deadline = syncCallDeadlineOption({}, savedProfile);
-  const settings = { ...(await continuationProfileEntries({}, savedProfile)), syncCallDeadlineMode: deadline.mode, syncCallDeadlineMs: deadline.deadlineMs };
-  if (command === 'status' || command === 'arm-status') {
-    await printContinuationCliStatus(root, settings);
-    return;
-  }
-  if (command === 'disarm') {
-    const taskRef = String(parsed.task ?? '').trim();
-    if (!taskRef) throw new Error('continuation disarm requires --task <id|short-id>.');
-    const continuationRoot = path.join(codexProHome(), 'continuation');
-    const storeUrl = pathToFileURL(path.join(projectRoot, 'dist', 'continuation', 'store.js')).href;
-    const opsUrl = pathToFileURL(path.join(projectRoot, 'dist', 'continuation', 'ops.js')).href;
-    const { ContinuationStore } = await import(storeUrl);
-    const { cancelContinuation } = await import(opsUrl);
-    const store = new ContinuationStore(continuationRoot, 128);
-    const records = await store.list();
-    const matches = records.filter((record) => sameContinuationRoot(record.workspaceRoot, root) && (record.id === taskRef || record.id.startsWith(`continuation_${taskRef}`) || record.id.startsWith(taskRef)));
-    if (matches.length !== 1) throw new Error(matches.length ? 'continuation task reference is ambiguous.' : 'continuation task was not found for this workspace.');
-    const current = matches[0];
-    const binding = { workspace: { id: current.workspaceId, root: current.workspaceRoot }, ...(current.mcpSessionId ? { sessionId: current.mcpSessionId } : {}) };
-    const canceled = await cancelContinuation({ store, binding, continuationId: current.id, expectedRevision: current.revision, reason: 'user_canceled' });
-    printBox('CodexPro continuation disarmed', [
-      labelValue('Task', canceled.id.replace(/^continuation_/, '').slice(0, 8)),
-      labelValue('State', canceled.state),
-      labelValue('Revision', String(canceled.revision)),
-      'Continuation automation only was canceled. Local processes, jobs, Goals, browser processes, runtime, tunnel, and Git state were not stopped.'
-    ]);
-    return;
-  }
-  const continuationEnabled = settings.continuationEnabled;
-  const action = argv[1];
-  if (!["pair", "open", "status", "auth", "clear-profile"].includes(action)) throw new Error("Supported browser actions: pair, open, status, auth, clear-profile.");
-  const profile = parsed.profile ?? settings.continuationProfile;
-  if (!continuationEnabled && action === 'status') {
-    printBox('CodexPro browser continuation', [
-      labelValue('Task continuation', 'disabled (saved next run)'),
-      labelValue('Profile', profile),
-      labelValue('Browser setup', 'not required while continuation is disabled')
-    ]);
-    return;
-  }
-  if (!continuationEnabled) throw new Error('continuation_disabled: enable task continuation before browser setup.');
-  const browser = parsed.browser ?? settings.continuationBrowser;
-  const executable = parsed.executable;
-  const homeDir = codexProHome();
-  const extensionPath = path.join(projectRoot, "browser-extension");
-  const authModuleUrl = pathToFileURL(path.join(projectRoot, "dist", "continuation", "browserAuth.js")).href;
-  const profileModuleUrl = pathToFileURL(path.join(projectRoot, "dist", "continuation", "browserProfile.js")).href;
-  const launcherModuleUrl = pathToFileURL(path.join(projectRoot, "dist", "continuation", "browserLauncher.js")).href;
-  const { BrowserPairingStore } = await import(authModuleUrl);
-  const pairingStore = new BrowserPairingStore(path.join(homeDir, "continuation", "browser"));
-  if (action === "pair") {
-    const pairing = await pairingStore.createPairing(profile);
-    let bridge = "not running";
-    try {
-      const runtime = JSON.parse(fs.readFileSync(path.join(homeDir, "continuation", "browser", "runtime.json"), "utf8"));
-      if (typeof runtime.url === "string" && /^http:\/\/127\.0\.0\.1:\d+$/.test(runtime.url)) bridge = runtime.url;
-    } catch {}
-    console.log("CodexPro browser continuation pairing");
-    console.log(`Profile: ${pairing.profileLabel}`);
-    console.log(`Pairing code: ${pairing.code}`);
-    console.log(`Expires: ${pairing.expiresAt}`);
-    console.log(`Bridge: ${bridge}`);
-    console.log(`Extension: ${extensionPath}`);
-    console.log("Load the unpacked extension manually in the dedicated managed browser profile, then enter this code in the extension popup.");
-    console.log("The browser credential is generated only during local extension exchange and is never printed here.");
-    return;
-  }
-  const profileModule = await import(profileModuleUrl);
-  const launcherModule = await import(launcherModuleUrl);
-  if (action === "clear-profile") {
-    if (!parsed.yes) throw new Error('clear-profile is destructive; pass --yes after verifying the exact managed profile label.');
-    const managed = await profileModule.existingManagedBrowserProfile(homeDir, profile);
-    if (!managed) throw new Error(`Managed browser profile ${profile} is not initialized.`);
-    const expectedParent = path.resolve(homeDir, 'browser', 'chatgpt');
-    const actualParent = path.dirname(path.resolve(managed.profileRoot));
-    if (!sameContinuationRoot(expectedParent, actualParent)) throw new Error('Managed browser profile resolved outside the protected CodexPro browser root.');
-    const clients = await pairingStore.listPublicClients();
-    const paired = clients.some((entry) => entry.profile_label === profile && entry.active === true);
-    const status = await profileModule.browserProfileStatus({ profile: managed, paired, processIdentity: launcherModule.managedBrowserProcessStartIdentity });
-    if (status.running) throw new Error(`Managed browser profile ${profile} is running; close that managed browser before clearing it.`);
-    for (const client of clients) {
-      if (client.profile_label === profile && client.active === true && typeof client.client_id === 'string') await pairingStore.revokeClient(client.client_id);
-    }
-    fs.rmSync(managed.profileRoot, { recursive: true, force: false });
-    printBox('CodexPro managed browser profile cleared', [
-      labelValue('Profile', profile),
-      labelValue('Paired client', paired ? 'revoked' : 'none'),
-      'Only the selected CodexPro-managed ChatGPT browser profile was deleted. Normal browser profiles and other managed profiles were untouched.'
-    ]);
-    return;
-  }
-  if (action === "status") {
-    const managed = await profileModule.existingManagedBrowserProfile(homeDir, profile);
-    if (!managed) { console.log(`Managed browser profile ${profile} is not initialized.`); return; }
-    const clients = await pairingStore.listPublicClients();
-    const paired = clients.some((entry) => entry.profile_label === profile && entry.active === true);
-    console.log(JSON.stringify(await profileModule.browserProfileStatus({ profile: managed, paired, processIdentity: launcherModule.managedBrowserProcessStartIdentity }), null, 2));
-    return;
-  }
-  const managed = profileModule.resolveManagedBrowserProfile({
-    homeDir,
-    profileLabel: profile,
-    browser,
-    sourceRoots: [process.cwd()]
-  });
-  const browserExecutable = profileModule.discoverBrowserExecutable({ browser, override: executable });
-  const launched = await launcherModule.launchManagedBrowser({
-    executable: browserExecutable,
-    profile: managed,
-    extensionPath,
-    url: "https://chatgpt.com/"
-  });
-  console.log(`Managed ChatGPT browser profile: ${managed.profileLabel}`);
-  console.log(`Browser: ${managed.browser}`);
-  console.log(`Process: ${launched.pid}${launched.reused ? " (existing managed instance)" : ""}`);
-  if (action === "auth") {
-    console.log("WAITING_FOR_USER_AUTH");
-    console.log("Sign in to ChatGPT directly in the managed browser. Complete any provider login, CAPTCHA, passkey, email confirmation, or 2FA in the browser, then return to the controlling ChatGPT conversation and send: continue");
-    console.log("Do not paste credentials or verification codes into CodexPro or ChatGPT maintenance messages.");
+function userProbePreference() {
+  try {
+    return readJsonFile(path.join(codexProHome(), 'user-preferences.json'))?.localServiceProbeEnabled === true;
+  } catch {
+    return false; // An invalid preference file must never enable an opt-in capability.
   }
 }
+
+function userDefaultProfile() {
+  return userProbePreference() ? { localServiceProbeEnabled: true } : {};
+}
+
+function saveUserProbePreference(enabled) {
+  const home = codexProHome();
+  fs.mkdirSync(home, { recursive: true, mode: 0o700 });
+  const filePath = path.join(home, 'user-preferences.json');
+  const existing = readJsonFile(filePath);
+  const payload = { ...(existing && typeof existing === 'object' && !Array.isArray(existing) ? existing : {}), localServiceProbeEnabled: enabled };
+  fs.writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
+  try { fs.chmodSync(filePath, 0o600); } catch {}
+}
+
 function profileDir() {
   return path.join(codexProHome(), 'profiles');
 }
@@ -1247,12 +923,13 @@ function readJsonFile(filePath) {
 }
 
 function loadWorkspaceProfile(root) {
+  const inherited = userDefaultProfile();
   const profilePath = profilePathForRoot(root);
-  if (!fs.existsSync(profilePath)) return {};
+  if (!fs.existsSync(profilePath)) return inherited;
   const profile = readJsonFile(profilePath);
-  if (!profile || typeof profile !== 'object' || Array.isArray(profile)) return {};
-  if (profile.root && profile.root !== root) return {};
-  return { ...profile, profilePath };
+  if (!profile || typeof profile !== 'object' || Array.isArray(profile)) return inherited;
+  if (profile.root && profile.root !== root) return inherited;
+  return { ...inherited, ...profile, profilePath };
 }
 
 function listWorkspaceProfiles() {
@@ -1285,6 +962,7 @@ function saveWorkspaceProfile(root, profile) {
     version: 1,
     root,
     updatedAt: new Date().toISOString(),
+    ...userDefaultProfile(),
     ...profile
   };
   fs.writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
@@ -1301,7 +979,9 @@ function saveRuntimeConnection(root, details, options = {}) {
     version: 1,
     root,
     pid: process.pid,
+    pidStartKey: processStartIdentity(process.pid),
     runtimePid: options.runtimePid ?? null,
+    runtimePidStartKey: options.runtimePid ? processStartIdentity(options.runtimePid) : null,
     updatedAt: new Date().toISOString(),
     endpoint: details.endpoint,
     localBase: options.localBase ?? '',
@@ -1316,25 +996,17 @@ function saveRuntimeConnection(root, details, options = {}) {
     write: options.write ?? '',
     toolMode: options.toolMode ?? '',
     toolCards: Boolean(options.toolCards),
-    syncCallDeadlineMode: options.syncCallDeadlineMode ?? 'bounded',
-    syncCallDeadlineMs: options.syncCallDeadlineMs ?? DEFAULT_SYNC_CALL_DEADLINE_MS,
     runtimeGenerationId: options.runtimeGenerationId ?? '',
     transportState: options.transportState ?? 'ready',
-    continuationEnabled: Boolean(options.continuationEnabled),
-    continuationBrowser: options.continuationBrowser ?? 'chrome',
-    continuationProfile: options.continuationProfile ?? 'default',
-    continuationCooldownMs: options.continuationCooldownMs ?? 60_000,
-    continuationMaxDispatches: options.continuationMaxDispatches ?? 20,
-    continuationUnexpectedGraceMs: options.continuationUnexpectedGraceMs ?? 120_000,
-    continuationNotificationsEnabled: options.continuationNotificationsEnabled !== false,
-    continuationTelegramEnabled: Boolean(options.continuationTelegramEnabled),
     analysisEnabled: Boolean(options.analysisEnabled),
     artifactExportEnabled: Boolean(options.artifactExportEnabled),
+    localServiceProbeEnabled: Boolean(options.localServiceProbeEnabled),
     goalsEnabled: Boolean(options.goalsEnabled),
     codeGraphEnabled: Boolean(options.codeGraphEnabled),
     lspEnabled: Boolean(options.lspEnabled),
     allowGitPush: Boolean(options.allowGitPush),
-    inheritEnv: Boolean(options.inheritEnv)
+    inheritEnv: Boolean(options.inheritEnv),
+    openAiHealthRoot: ownedOpenAiHealthRoot(options.openAiHealthRoot)
   };
   fs.writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
   try {
@@ -1358,12 +1030,227 @@ function updateRuntimeTransportState(root, runtimeGenerationId, transportState) 
   }
 }
 
+function updateRuntimeOpenAiHealthRoot(root, runtimeGenerationId, healthRoot) {
+  const ownedRoot = ownedOpenAiHealthRoot(healthRoot);
+  if (!ownedRoot) return false;
+  try {
+    const filePath = runtimeStatusPathForRoot(root);
+    const runtime = readJsonFile(filePath);
+    if (runtime?.pid !== process.pid || runtime?.runtimeGenerationId !== runtimeGenerationId) return false;
+    const payload = { ...runtime, updatedAt: new Date().toISOString(), openAiHealthRoot: ownedRoot };
+    fs.writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
+    try { fs.chmodSync(filePath, 0o600); } catch {}
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function clearRuntimeConnection(root) {
   try {
     const filePath = runtimeStatusPathForRoot(root);
     const runtime = readJsonFile(filePath);
     if (runtime?.pid === process.pid) fs.rmSync(filePath, { force: true });
   } catch {}
+}
+
+function canonicalRoot(root) {
+  try { return fs.realpathSync.native(root); } catch { return path.resolve(root); }
+}
+
+function ownedOpenAiHealthRoot(value) {
+  if (typeof value !== 'string' || !value.trim()) return '';
+  const resolved = path.resolve(value);
+  const tempRoot = path.resolve(os.tmpdir());
+  const parent = path.dirname(resolved);
+  const sameTempRoot = process.platform === 'win32' ? parent.toLowerCase() === tempRoot.toLowerCase() : parent === tempRoot;
+  if (!sameTempRoot) return '';
+  if (!path.basename(resolved).startsWith('codexpro-openai-tunnel-')) return '';
+  try {
+    const stat = fs.lstatSync(resolved);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) return '';
+  } catch (error) {
+    if (error?.code !== 'ENOENT') return '';
+  }
+  return resolved;
+}
+
+function removeOwnedOpenAiHealthRoot(value) {
+  const ownedRoot = ownedOpenAiHealthRoot(value);
+  if (!ownedRoot) return false;
+  try {
+    fs.rmSync(ownedRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function runtimeStatusForRoot(root) {
+  const selectedRoot = canonicalRoot(root);
+  const filePath = runtimeStatusPathForRoot(selectedRoot);
+  const base = {
+    state: 'stopped',
+    root: selectedRoot,
+    launcher_pid: null,
+    runtime_pid: null,
+    transport: 'unknown',
+    tunnel: '',
+    local_port: null,
+    port_release: 'unknown',
+    generation_id: null,
+    package_version: packageVersion(),
+    build_revision: buildIdentity().revision,
+    build_channel: buildIdentity().channel,
+    reason: ''
+  };
+  if (!fs.existsSync(filePath)) return base;
+  let runtime;
+  try { runtime = readJsonFile(filePath); }
+  catch { return { ...base, state: 'stale', reason: 'runtime record is malformed' }; }
+  if (!runtime || typeof runtime !== 'object' || Array.isArray(runtime)) return { ...base, state: 'stale', reason: 'runtime record is malformed' };
+  if (runtime.root && canonicalRoot(runtime.root) !== selectedRoot) return { ...base, state: 'stale', reason: 'runtime record belongs to another workspace' };
+  const launcherPid = Number(runtime.pid);
+  const runtimePid = runtime.runtimePid === null || runtime.runtimePid === undefined ? null : Number(runtime.runtimePid);
+  const launcherAlive = runtimeProcessAlive(launcherPid);
+  const runtimeAlive = runtimePid ? runtimeProcessAlive(runtimePid) : true;
+  const launcherIdentity = runtime.pidStartKey ? processStartIdentity(launcherPid) : null;
+  const runtimeIdentity = runtimePid && runtime.runtimePidStartKey ? processStartIdentity(runtimePid) : null;
+  const identityMismatch = Boolean(runtime.pidStartKey && (!launcherIdentity || launcherIdentity !== runtime.pidStartKey));
+  const runtimeIdentityMismatch = Boolean(runtime.runtimePidStartKey && (!runtimeIdentity || runtimeIdentity !== runtime.runtimePidStartKey));
+  const transport = ['ready', 'unavailable', 'unknown'].includes(runtime.transportState) ? runtime.transportState : 'unknown';
+  let state = 'running';
+  let reason = '';
+  if (!Number.isInteger(launcherPid) || launcherPid <= 0 || !launcherAlive) { state = 'stale'; reason = 'recorded launcher is not alive'; }
+  else if (identityMismatch || runtimeIdentityMismatch) { state = 'stale'; reason = 'recorded process identity no longer matches'; }
+  else if (!runtimeAlive) { state = 'degraded'; reason = 'launcher is alive but the recorded MCP server is not'; }
+  else if (transport !== 'ready') { state = 'degraded'; reason = transport === 'unavailable' ? 'transport is unavailable' : 'transport readiness is unknown'; }
+  else if (!runtime.pidStartKey) { state = 'degraded'; reason = 'legacy runtime record has no start identity'; }
+  return {
+    ...base,
+    state,
+    launcher_pid: Number.isInteger(launcherPid) && launcherPid > 0 ? launcherPid : null,
+    runtime_pid: Number.isInteger(runtimePid) && runtimePid > 0 ? runtimePid : null,
+    transport,
+    tunnel: typeof runtime.tunnel === 'string' ? runtime.tunnel : '',
+    local_port: (() => { try { return new URL(String(runtime.localBase || '')).port ? Number(new URL(String(runtime.localBase)).port) : null; } catch { return null; } })(),
+    generation_id: typeof runtime.runtimeGenerationId === 'string' && /^[A-Za-z0-9._:-]{1,160}$/.test(runtime.runtimeGenerationId) ? runtime.runtimeGenerationId : null,
+    reason
+  };
+}
+
+function printRuntimeStatus(status, json = false) {
+  if (json) {
+    const { root: _root, ...publicStatus } = status;
+    console.log(JSON.stringify(publicStatus, null, 2));
+    return;
+  }
+  printBox('CodexPro runtime status', [
+    labelValue('State', status.state),
+    labelValue('Package', `${status.package_version}${status.build_channel !== 'unknown' ? ` (${status.build_channel})` : ''}`),
+    labelValue('Revision', status.build_revision || 'unknown'),
+    labelValue('Workspace', status.root),
+    labelValue('Launcher PID', status.launcher_pid ?? 'none'),
+    labelValue('Runtime PID', status.runtime_pid ?? 'none'),
+    labelValue('Transport', status.transport),
+    labelValue('Tunnel', status.tunnel || 'none'),
+    labelValue('Local port', status.local_port ?? 'unknown'),
+    ...(status.port_release && status.port_release !== 'unknown' ? [labelValue('Port after stop', status.port_release)] : []),
+    ...(status.reason ? [labelValue('Reason', status.reason)] : [])
+  ]);
+}
+
+async function runStatus(argv) {
+  const args = parseArgs(argv);
+  const root = realDir(args.root ?? process.env.CODEXPRO_ROOT ?? process.cwd());
+  printRuntimeStatus(runtimeStatusForRoot(root), Boolean(args.json));
+}
+
+function waitForRecordedProcessExit(pid, timeoutMs = 3000) {
+  const started = Date.now();
+  while (runtimeProcessAlive(pid) && Date.now() - started < timeoutMs) {
+    const wait = spawnSync(process.execPath, ['-e', 'setTimeout(() => {}, 50)'], { stdio: 'ignore', windowsHide: true, timeout: 200 });
+    if (wait.error) break;
+  }
+  return !runtimeProcessAlive(pid);
+}
+
+function runtimePortTarget(localBase) {
+  try {
+    const url = new URL(String(localBase || ''));
+    const host = url.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+    if (!url.port || !['localhost', '127.0.0.1', '::1'].includes(host)) return null;
+    return { host: host === 'localhost' ? '127.0.0.1' : host, port: Number(url.port), family: host.includes(':') ? 6 : 4 };
+  } catch { return null; }
+}
+
+function probeRuntimePort(target) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const socket = net.createConnection({ host: target.host, port: target.port, family: target.family });
+    const finish = (state) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(state);
+    };
+    socket.once('connect', () => finish('occupied'));
+    socket.once('error', (error) => finish(error?.code === 'ECONNREFUSED' ? 'released' : 'unknown'));
+    socket.setTimeout(500, () => finish('unknown'));
+  });
+}
+
+async function waitForRuntimePortRelease(localBase, timeoutMs = 3000) {
+  const target = runtimePortTarget(localBase);
+  if (!target) return 'unknown';
+  const deadline = Date.now() + timeoutMs;
+  let last = 'unknown';
+  while (Date.now() < deadline) {
+    last = await probeRuntimePort(target);
+    if (last === 'released' || last === 'occupied') return last;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return last;
+}
+
+async function runStop(argv) {
+  const args = parseArgs(argv);
+  const root = realDir(args.root ?? process.env.CODEXPRO_ROOT ?? process.cwd());
+  const filePath = runtimeStatusPathForRoot(root);
+  let runtime;
+  try { runtime = readJsonFile(filePath); } catch { throw new Error('Refusing to stop: runtime record is malformed.'); }
+  const status = runtimeStatusForRoot(root);
+  if (!['running', 'degraded'].includes(status.state)) throw new Error(`Refusing to stop: ${status.state} runtime cannot be proven owned (${status.reason || 'no active owned runtime'}).`);
+  const launcherPid = Number(runtime?.pid);
+  if (!runtime?.pidStartKey || processStartIdentity(launcherPid) !== runtime.pidStartKey) throw new Error('Refusing to stop: launcher process identity could not be verified.');
+  const runtimePid = runtime.runtimePid ? Number(runtime.runtimePid) : null;
+  if (runtimePid && runtimeProcessAlive(runtimePid) && (!runtime.runtimePidStartKey || processStartIdentity(runtimePid) !== runtime.runtimePidStartKey)) throw new Error('Refusing to stop: server process identity could not be verified.');
+  try { process.kill(launcherPid, 'SIGTERM'); } catch (error) { if (error?.code !== 'ESRCH') throw new Error(`Graceful runtime stop failed: ${error.message}`); }
+  let stopped = waitForRecordedProcessExit(launcherPid);
+  if (!stopped && process.platform === 'win32') {
+    const result = spawnSync('taskkill.exe', ['/PID', String(launcherPid), '/T', '/F'], { stdio: 'ignore', windowsHide: true, timeout: 5000 });
+    if (result.status !== 0 && runtimeProcessAlive(launcherPid)) throw new Error('Refusing to stop: exact owned process tree did not terminate.');
+    stopped = waitForRecordedProcessExit(launcherPid, 3000);
+  }
+  // On Windows the launcher may exit before its owned MCP server finishes teardown.
+  // Wait boundedly for that child; never signal a PID whose ownership may have changed.
+  if (!stopped || (runtimePid && !waitForRecordedProcessExit(runtimePid, 5000))) throw new Error('Refusing to clean runtime state: an owned process is still alive.');
+  if (runtime.tunnel === 'openai' && runtime.openAiHealthRoot) {
+    const healthRoot = ownedOpenAiHealthRoot(runtime.openAiHealthRoot);
+    if (!healthRoot) statusLine('warn', 'Skipped invalid OpenAI tunnel health scratch path from runtime state.');
+    else if (!removeOwnedOpenAiHealthRoot(healthRoot)) statusLine('warn', 'Could not remove the owned OpenAI tunnel health scratch directory after stop.');
+  }
+  const portRelease = await waitForRuntimePortRelease(runtime.localBase);
+  const current = readJsonFile(filePath);
+  if (Number(current?.pid) === launcherPid && current?.pidStartKey === runtime.pidStartKey) fs.rmSync(filePath, { force: true });
+  if (runtime.tunnel === 'openai' && typeof runtime.endpoint === 'string') {
+    const leasePath = openAiTunnelLeasePath(runtime.endpoint);
+    try {
+      const lease = readJsonFile(leasePath);
+      if (Number(lease?.pid) === launcherPid && canonicalRoot(lease?.root || '') === canonicalRoot(root)) fs.rmSync(leasePath, { force: true });
+    } catch {}
+  }
+  printRuntimeStatus({ ...status, state: 'stopped', launcher_pid: null, runtime_pid: null, port_release: portRelease, reason: portRelease === 'occupied' ? 'owned runtime stopped; local port remains occupied by another process' : portRelease === 'released' ? 'owned runtime stopped; local port released' : 'owned runtime stopped; local port release could not be verified' }, Boolean(args.json));
 }
 
 function sanitizedProfile(profile) {
@@ -1383,6 +1270,8 @@ function reusableProfilePayload(profile, overrides = {}) {
     updatedAt,
     profilePath,
     allowedRoots,
+    syncCallDeadlineMode: _obsoleteMode,
+    syncCallDeadlineMs: _obsoleteMs,
     ...rest
   } = profile || {};
   return {
@@ -1415,41 +1304,6 @@ function optionBool(args, profile, field, envNames = [], fallback = false) {
   return fallback;
 }
 
-function strictSyncCallDeadlineMs(value, label = 'sync call deadline') {
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < MIN_SYNC_CALL_DEADLINE_MS || parsed > MAX_SYNC_CALL_DEADLINE_MS) {
-    throw new Error(`${label} must be an integer from 300000 to 3600000 ms (5-60 minutes).`);
-  }
-  return parsed;
-}
-
-function syncCallDeadlineOption(args, profile = {}) {
-  const reference = profile.syncCallDeadlineMs === undefined ? DEFAULT_SYNC_CALL_DEADLINE_MS : strictSyncCallDeadlineMs(profile.syncCallDeadlineMs, 'saved sync call deadline');
-  if (args.syncCallDeadlineMinutes !== undefined) {
-    const raw = String(args.syncCallDeadlineMinutes).trim().toLowerCase();
-    if (raw === 'unlimited') return { mode: 'observe', deadlineMs: reference };
-    if (!/^[0-9]+$/.test(raw)) throw new Error('--sync-call-deadline-minutes must be an integer from 5 to 60 or unlimited.');
-    const minutes = Number(raw);
-    if (!Number.isInteger(minutes) || minutes < 5 || minutes > 60) throw new Error('--sync-call-deadline-minutes must be an integer from 5 to 60 or unlimited.');
-    return { mode: 'bounded', deadlineMs: minutes * 60_000 };
-  }
-  const envModeRaw = process.env.CODEXPRO_SYNC_CALL_DEADLINE_MODE;
-  const envMsRaw = process.env.CODEXPRO_SYNC_CALL_DEADLINE_MS;
-  if ((envModeRaw !== undefined && envModeRaw !== '') || (envMsRaw !== undefined && envMsRaw !== '')) {
-    const mode = envModeRaw === 'unlimited' ? 'observe' : (envModeRaw || 'bounded');
-    if (!['bounded','observe'].includes(mode)) throw new Error('CODEXPRO_SYNC_CALL_DEADLINE_MODE must be bounded or observe.');
-    return { mode, deadlineMs: envMsRaw ? strictSyncCallDeadlineMs(envMsRaw, 'CODEXPRO_SYNC_CALL_DEADLINE_MS') : reference };
-  }
-  const mode = profile.syncCallDeadlineMode ?? 'bounded';
-  if (!['bounded','observe'].includes(mode)) throw new Error('Saved sync call deadline mode must be bounded or observe.');
-  return { mode, deadlineMs: reference };
-}
-
-function syncCallDeadlineProfileEntry(args, profile = {}) {
-  const resolved = syncCallDeadlineOption(args, profile);
-  return { syncCallDeadlineMode: resolved.mode, syncCallDeadlineMs: resolved.deadlineMs };
-}
-
 function jsonArgsEnv(value) {
   if (Array.isArray(value)) return JSON.stringify(value.map(String));
   const raw = String(value ?? '').trim();
@@ -1475,25 +1329,11 @@ function toolCardsCliArgs(args, profile = {}) {
   return ['--tool-cards', optionBool(args, profile, 'toolCards', ['CODEXPRO_TOOL_CARDS'], false) ? 'on' : 'off'];
 }
 
-async function continuationProfileEntries(args, profile = {}) {
-  const moduleUrl = pathToFileURL(path.join(projectRoot, 'dist', 'continuation', 'settings.js')).href;
-  const { normalizeContinuationSettings } = await import(moduleUrl);
-  return normalizeContinuationSettings({
-    continuationEnabled: args.continuation ?? optionValue(args, profile, 'continuationEnabled', ['CODEXPRO_CONTINUATION_ENABLED']),
-    continuationBrowser: optionValue(args, profile, 'continuationBrowser', ['CODEXPRO_CONTINUATION_BROWSER']),
-    continuationProfile: optionValue(args, profile, 'continuationProfile', ['CODEXPRO_CONTINUATION_PROFILE']),
-    continuationCooldownMs: optionValue(args, profile, 'continuationCooldownMs', ['CODEXPRO_CONTINUATION_COOLDOWN_MS']),
-    continuationMaxDispatches: optionValue(args, profile, 'continuationMaxDispatches', ['CODEXPRO_CONTINUATION_MAX_DISPATCHES']),
-    continuationUnexpectedGraceMs: optionValue(args, profile, 'continuationUnexpectedGraceMs', ['CODEXPRO_CONTINUATION_UNEXPECTED_GRACE_MS']),
-    continuationNotificationsEnabled: args.continuationNotifications ?? optionValue(args, profile, 'continuationNotificationsEnabled', ['CODEXPRO_CONTINUATION_NOTIFICATIONS_ENABLED']),
-    continuationTelegramEnabled: args.continuationTelegram ?? optionValue(args, profile, 'continuationTelegramEnabled', ['CODEXPRO_CONTINUATION_TELEGRAM_ENABLED'])
-  });
-}
-
 function capabilityProfileEntries(args, profile = {}) {
   const specs = [
     ['analysisEnabled', ['CODEXPRO_ANALYSIS'], true],
     ['artifactExportEnabled', ['CODEXPRO_ARTIFACT_EXPORT'], false],
+    ['localServiceProbeEnabled', ['CODEXPRO_LOCAL_SERVICE_PROBE'], false],
     ['goalsEnabled', ['CODEXPRO_GOALS'], false],
     ['codeGraphEnabled', ['CODEXPRO_CODEGRAPH'], false],
     ['lspEnabled', ['CODEXPRO_LSP'], false],
@@ -2496,6 +2336,9 @@ function spawnSyncPortable(command, args, options = {}) {
   });
 }
 
+const PROCESS_CLOSE_GRACE_MS = 1000;
+const PROCESS_TIMEOUT_SETTLEMENT_MS = 4000;
+
 function runProcessCaptured(command, args, options) {
   const timeoutMs = options.timeoutMs;
   const maxOutputBytes = options.maxOutputBytes;
@@ -2515,7 +2358,9 @@ function runProcessCaptured(command, args, options) {
     let stdout = '';
     let stderr = '';
     let timedOut = false;
-    let closed = false;
+    let settled = false;
+    let closeGraceTimer = null;
+    let timeoutSettlementTimer = null;
     const appendBounded = (current, chunk) => {
       if (Buffer.byteLength(current, 'utf8') > retainedOutputBytes) return current;
       const next = current + String(chunk);
@@ -2524,9 +2369,40 @@ function runProcessCaptured(command, args, options) {
         ? buffer.subarray(0, retainedOutputBytes).toString('utf8')
         : next;
     };
+    const finish = (exitCode, signal, completionSource, spawnError = false, spawnErrorMessage = '') => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (closeGraceTimer) clearTimeout(closeGraceTimer);
+      if (timeoutSettlementTimer) clearTimeout(timeoutSettlementTimer);
+      if (completionSource !== 'close') {
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        child.unref();
+      }
+      const out = trimBytes(stdout, maxOutputBytes);
+      const timeoutMessage = timedOut ? `\n[codexpro] Command timed out after ${timeoutMs} ms.` : '';
+      const errorText = spawnErrorMessage || `${stderr}${timeoutMessage}`;
+      const err = trimBytes(errorText, maxOutputBytes);
+      resolve({
+        exitCode,
+        signal,
+        durationMs: Date.now() - started,
+        timedOut,
+        stdout: spawnError ? '' : out.text,
+        stderr: err.text,
+        truncated: out.truncated || err.truncated,
+        spawnError,
+        completionSource
+      });
+    };
     const timer = setTimeout(() => {
       timedOut = true;
       killProcess(child);
+      timeoutSettlementTimer = setTimeout(() => {
+        finish(child.exitCode, child.signalCode, 'timeout-fallback');
+      }, PROCESS_TIMEOUT_SETTLEMENT_MS);
+      timeoutSettlementTimer.unref();
     }, timeoutMs);
     timer.unref();
 
@@ -2536,33 +2412,17 @@ function runProcessCaptured(command, args, options) {
     child.stderr.on('data', (chunk) => {
       stderr = appendBounded(stderr, chunk);
     });
-    child.on('error', (error) => {
-      clearTimeout(timer);
-      resolve({
-        exitCode: 127,
-        signal: null,
-        durationMs: Date.now() - started,
-        timedOut,
-        stdout: '',
-        stderr: error instanceof Error ? error.message : String(error),
-        spawnError: true
-      });
+    child.once('error', (error) => {
+      finish(127, null, 'spawn-error', true, error instanceof Error ? error.message : String(error));
     });
-    child.on('close', (exitCode, signal) => {
-      closed = true;
-      clearTimeout(timer);
-      const out = trimBytes(stdout, maxOutputBytes);
-      const err = trimBytes(`${stderr}${timedOut ? `\n[codexpro] Command timed out after ${timeoutMs} ms.` : ''}`, maxOutputBytes);
-      resolve({
-        exitCode,
-        signal,
-        durationMs: Date.now() - started,
-        timedOut,
-        stdout: out.text,
-        stderr: err.text,
-        truncated: out.truncated || err.truncated,
-        spawnError: false
-      });
+    child.once('exit', (exitCode, signal) => {
+      closeGraceTimer = setTimeout(() => {
+        finish(exitCode, signal, 'exit-fallback');
+      }, PROCESS_CLOSE_GRACE_MS);
+      closeGraceTimer.unref();
+    });
+    child.once('close', (exitCode, signal) => {
+      finish(exitCode, signal, 'close');
     });
   });
 }
@@ -2619,6 +2479,7 @@ function writeExecutionOutputs(root, contextDir, commandInfo, result, diffText, 
     `Exit code: ${result.exitCode ?? 'null'}`,
     result.signal ? `Signal: ${result.signal}` : '',
     `Timed out: ${result.timedOut ? 'yes' : 'no'}`,
+    `Completion: ${result.completionSource}`,
     `Duration: ${result.durationMs} ms`,
     `Diff path: ${path.posix.join(contextDir, 'implementation-diff.patch')}`,
     `Execution log: ${path.posix.join(contextDir, 'execution-log.jsonl')}`,
@@ -2639,6 +2500,7 @@ function writeExecutionOutputs(root, contextDir, commandInfo, result, diffText, 
     exit_code: result.exitCode,
     signal: result.signal,
     timed_out: result.timedOut,
+    completion_source: result.completionSource,
     duration_ms: result.durationMs,
     stdout_excerpt: result.stdout,
     stderr_excerpt: result.stderr,
@@ -2803,6 +2665,7 @@ async function executeHandoffRequest(request, args, options = {}) {
       finished_at: new Date().toISOString(),
       exit_code: result.timedOut || interruptedSignal ? null : (result.exitCode ?? null),
       timed_out: Boolean(result.timedOut),
+      completion_source: result.completionSource,
       duration_ms: result.durationMs,
       ...(interruptedSignal ? { interrupted_signal: interruptedSignal } : {}),
       execution_outcome: runState === 'completed' ? 'completed' : 'unknown',
@@ -3434,7 +3297,7 @@ async function confirmLoopHandoff(args, root) {
   }
 }
 
-async function confirmLoopContinuation(args, root, iteration, planPath) {
+async function confirmLoopIteration(args, root, iteration, planPath) {
   if (!args.requireHumanConfirmation) return true;
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     throw new Error('--require-human-confirmation needs an interactive terminal before running follow-up plans.');
@@ -3525,7 +3388,7 @@ async function runLoopHandoff(argv) {
 
   for (let iteration = 1; iteration <= maxIters; iteration += 1) {
     if (iteration > 1) {
-      const continueLoop = await confirmLoopContinuation(args, root, iteration, paths.planPath);
+      const continueLoop = await confirmLoopIteration(args, root, iteration, paths.planPath);
       if (!continueLoop) {
         stopReason = 'human_cancelled';
         break;
@@ -3922,6 +3785,7 @@ async function runDoctor(argv) {
 
   const root = realDir(args.root ?? process.env.CODEXPRO_ROOT ?? process.cwd());
   const profile = args.noProfile ? {} : loadWorkspaceProfile(root);
+  const identity = buildIdentity();
   const effectiveArgs = { ...profile, ...args };
   const tunnel = optionValue(args, profile, 'tunnel', ['CODEXPRO_TUNNEL'], 'openai');
   const host = optionValue(args, profile, 'host', ['CODEXPRO_HOST'], '127.0.0.1');
@@ -3982,6 +3846,8 @@ async function runDoctor(argv) {
     labelValue('Workspace', root),
     labelValue('Mode', `${mode}  tools=${toolMode}  write=${write}  bash=${bash}`),
     labelValue('Tunnel', tunnel),
+    labelValue('Package', `${identity.packageName} ${identity.version}`),
+    labelValue('Build', `${identity.revision || 'unknown'} / ${identity.channel}`),
     ...(stableHostname ? [labelValue('Hostname', stableHostname)] : []),
     ...(profile.profilePath ? [labelValue('Profile', profile.profilePath)] : [])
   ]);
@@ -3989,6 +3855,7 @@ async function runDoctor(argv) {
   record(compareMajorVersion(process.versions.node, 20) ? 'ok' : 'fail', 'Node', `v${process.versions.node} (requires >=20)`);
   record(fs.existsSync(httpPath) && fs.existsSync(serverPath) ? 'ok' : 'fail', 'Build artifacts', fs.existsSync(httpPath) ? 'dist ready' : 'missing dist/http.js; run npm install && npm run build');
   record(fs.existsSync(path.join(projectRoot, 'package.json')) ? 'ok' : 'fail', 'Package root', projectRoot);
+  record(identity.version !== 'unknown' ? 'ok' : 'warn', 'Build provenance', `${identity.revision || 'revision unknown'} (${identity.channel})`);
   record(profile.profilePath ? 'ok' : 'warn', 'Saved profile', profile.profilePath ? profileSummary(profile) || profile.profilePath : 'none for this workspace');
   record(['agent', 'handoff', 'pro'].includes(mode) ? 'ok' : 'fail', 'Mode', ['agent', 'handoff', 'pro'].includes(mode) ? mode : '--mode must be agent, handoff, or pro');
   record(['off', 'safe', 'full'].includes(bash) ? 'ok' : 'fail', 'Bash mode', ['off', 'safe', 'full'].includes(bash) ? bash : '--bash must be off, safe, or full');
@@ -3997,11 +3864,19 @@ async function runDoctor(argv) {
   record(clipboard ? 'ok' : 'warn', 'Clipboard', clipboard || 'not found; URL will be printed for manual copy');
   record(browser ? 'ok' : 'warn', 'Browser open', browser || 'not found; open ChatGPT manually');
 
+  let existingRuntimeOnPort = false;
   try {
     await assertPortAvailable(host, port);
     record('ok', 'Local port', `${host}:${port} available`);
   } catch (error) {
-    record('fail', 'Local port', error instanceof Error ? error.message.split('\n')[0] : String(error));
+    const portOccupied = error instanceof Error && error.message === portInUseHelp(host, port);
+    const active = portOccupied ? runtimeStatusForRoot(root) : null;
+    if (active?.state === 'running' && active.runtime_pid && active.local_port === Number(port)) {
+      existingRuntimeOnPort = true;
+      record('warn', 'Local port', `${host}:${port} is occupied while this workspace has a recorded running CodexPro runtime (PID ${active.runtime_pid}). Do not launch a second instance; verify ownership with codexpro status.`);
+    } else {
+      record('fail', 'Local port', error instanceof Error ? error.message.split('\n')[0] : String(error));
+    }
   }
 
   if (tunnel === 'openai') {
@@ -4044,7 +3919,9 @@ async function runDoctor(argv) {
     process.exitCode = 1;
     return;
   }
-  statusLine('ok', warnings ? `Ready with ${warnings} warning${warnings === 1 ? '' : 's'}.` : 'Ready.');
+  statusLine('ok', existingRuntimeOnPort
+    ? `Existing runtime detected; do not launch another instance. ${warnings} warning${warnings === 1 ? '' : 's'}.`
+    : warnings ? `Ready with ${warnings} warning${warnings === 1 ? '' : 's'}.` : 'Ready.');
 }
 
 function normalizeSetupChoice(value, allowed, fallback) {
@@ -4205,7 +4082,6 @@ function profileFromPreference(root, args, profile, preference) {
     ...(toolMode ? { toolMode } : {}),
     ...(widgetDomain ? { widgetDomain } : {}),
     ...toolCardsProfileEntry(args, profile),
-    ...syncCallDeadlineProfileEntry(args, profile),
     ...capabilityProfileEntries(args, profile),
     ...(allowedRoots.length ? { allowedRoots } : {}),
     ...(args.noInstallCloudflared ? { noInstallCloudflared: true } : {}),
@@ -4452,7 +4328,6 @@ async function runSetupWizard(argv) {
         ...(toolMode ? { toolMode } : {}),
         ...(widgetDomain ? { widgetDomain } : {}),
         ...toolCardsEntry,
-        ...syncCallDeadlineProfileEntry(defaults, profile),
         ...capabilityProfileEntries(defaults, profile),
         ...(allowedRoots.length ? { allowedRoots } : {}),
         ...(defaults.noInstallCloudflared ? { noInstallCloudflared: true } : {})
@@ -4504,17 +4379,9 @@ function printProfile(root, profile) {
     ...(safe.write ? [labelValue('Write', safe.write)] : []),
     ...(safe.toolMode ? [labelValue('Tool mode', safe.toolMode)] : []),
     ...(safe.toolCards !== undefined ? [labelValue('Tool cards', safe.toolCards ? 'on' : 'off')] : []),
-    labelValue('Sync call deadline', safe.syncCallDeadlineMode === 'observe' ? 'Unlimited (observe only)' : `${Math.round((safe.syncCallDeadlineMs ?? DEFAULT_SYNC_CALL_DEADLINE_MS) / 60_000)} min`),
-    labelValue('Task continuation', safe.continuationEnabled ? 'on' : 'off'),
-    labelValue('Continuation browser', safe.continuationBrowser ?? 'chrome'),
-    labelValue('Continuation profile', safe.continuationProfile ?? 'default'),
-    labelValue('Continuation cooldown', `${safe.continuationCooldownMs ?? 60_000} ms`),
-    labelValue('Continuation max dispatches', safe.continuationMaxDispatches ?? 20),
-    labelValue('Unexpected interruption grace', `${safe.continuationUnexpectedGraceMs ?? 120_000} ms`),
-    labelValue('Continuation notifications', safe.continuationNotificationsEnabled === false ? 'off' : 'on'),
-    labelValue('Telegram continuation', safe.continuationTelegramEnabled ? 'on' : 'off'),
     labelValue('Analysis', safe.analysisEnabled === undefined ? 'on' : safe.analysisEnabled ? 'on' : 'off'),
     labelValue('Artifact export', safe.artifactExportEnabled ? 'on' : 'off'),
+    labelValue('Local service probe', safe.localServiceProbeEnabled ? 'on (Full mode)' : 'off'),
     labelValue('Durable Goals', safe.goalsEnabled ? 'on' : 'off'),
     labelValue('CodeGraph', safe.codeGraphEnabled ? 'on' : 'off'),
     labelValue('LSP', safe.lspEnabled ? 'on' : 'off'),
@@ -4546,6 +4413,35 @@ function printProfileList(profiles = listWorkspaceProfiles()) {
     return;
   }
   printBox('CodexPro saved setups', profiles.slice(0, 50).map((profile, index) => profileOneLine(profile, index + 1)));
+}
+
+function printProfilesJson(profiles) {
+  console.log(JSON.stringify(profiles.map((profile) => sanitizedProfile(profile)), null, 2));
+}
+
+function runProfiles(argv) {
+  const action = argv[0] && !argv[0].startsWith('--') ? argv[0] : 'list';
+  const args = parseArgs(action === 'list' ? argv : argv.slice(1));
+  const profiles = listWorkspaceProfiles();
+  if (action === 'list' || action === 'ls') {
+    if (args.json) {
+      printProfilesJson(profiles);
+      return;
+    }
+    printProfileList(profiles);
+    return;
+  }
+  if (action === 'show') {
+    const root = realDir(args.current ? (process.env.CODEXPRO_ROOT ?? process.cwd()) : (args.root ?? process.env.CODEXPRO_ROOT ?? process.cwd()));
+    const profile = loadWorkspaceProfile(root);
+    if (args.json) {
+      console.log(JSON.stringify(sanitizedProfile(profile), null, 2));
+      return;
+    }
+    printProfile(root, profile);
+    return;
+  }
+  throw new Error(`Unknown profiles action: ${action}`);
 }
 
 async function saveSettingsFromArgs(root, args, profile) {
@@ -4607,7 +4503,6 @@ async function saveSettingsFromArgs(root, args, profile) {
   const ngrokFallbackConfig = tunnel === 'openai'
     ? (profile.tunnel === 'ngrok' ? profile.ngrokConfig : profile.ngrokFallbackConfig) ?? ''
     : profile.ngrokFallbackConfig ?? '';
-  const continuation = await continuationProfileEntries(args, profile);
   const savedPath = saveWorkspaceProfile(root, {
     port,
     mode,
@@ -4635,8 +4530,6 @@ async function saveSettingsFromArgs(root, args, profile) {
     ...(toolMode ? { toolMode } : {}),
     ...(widgetDomain ? { widgetDomain } : {}),
     ...toolCardsProfileEntry(args, profile),
-    ...syncCallDeadlineProfileEntry(args, profile),
-    ...continuation,
     ...capabilityProfileEntries(args, profile),
     ...(allowedRoots.length ? { allowedRoots } : {}),
     ...(args.noInstallCloudflared ?? profile.noInstallCloudflared ? { noInstallCloudflared: true } : {})
@@ -4714,7 +4607,17 @@ async function runSettings(argv) {
     return;
   }
   const root = realDir(args.root ?? process.env.CODEXPRO_ROOT ?? process.cwd());
-  const profile = args.noProfile ? {} : loadWorkspaceProfile(root);
+  const profile = args.noProfile ? userDefaultProfile() : loadWorkspaceProfile(root);
+
+  if (action === 'user-default') {
+    if (args.localServiceProbeEnabled !== undefined) {
+      saveUserProbePreference(boolFromValue(args.localServiceProbeEnabled, false));
+      statusLine('ok', `Local service probe user preference: ${userProbePreference() ? 'on' : 'off'}`);
+    } else {
+      console.log(JSON.stringify({ localServiceProbeEnabled: userProbePreference() }));
+    }
+    return;
+  }
 
   if (action === 'list' || action === 'ls') {
     printProfileList();
@@ -4944,10 +4847,28 @@ async function main() {
   let argv = process.argv.slice(2);
   let connectionTest = false;
   if (argv[0] === '--version' || argv[0] === '-v' || argv[0] === 'version') {
-    console.log(packageVersion());
+    const identity = buildIdentity();
+    if (argv.includes('--verbose')) {
+      console.log(`Package: ${identity.packageName}`);
+      console.log(`Version: ${identity.version}`);
+      console.log(`Build revision: ${identity.revision || 'unknown'}`);
+      console.log(`Build channel: ${identity.channel}`);
+    } else console.log(identity.version);
     return;
   }
   let subcommand = argv[0];
+  if (subcommand === 'status') {
+    await runStatus(argv.slice(1));
+    return;
+  }
+  if (subcommand === 'profiles') {
+    runProfiles(argv.slice(1));
+    return;
+  }
+  if (subcommand === 'stop') {
+    await runStop(argv.slice(1));
+    return;
+  }
   if (subcommand === 'inspect' || subcommand === 'review') {
     await runAnalysisCli(subcommand, argv.slice(1));
     return;
@@ -4980,10 +4901,6 @@ async function main() {
   }
   if (subcommand === 'settings' || subcommand === 'config') {
     await runSettings(argv.slice(1));
-    return;
-  }
-  if (subcommand === 'continuation') {
-    await runContinuationCommand(argv.slice(1));
     return;
   }
   if (subcommand === 'execute-handoff' || subcommand === 'execute' || subcommand === 'run-handoff') {
@@ -5040,7 +4957,13 @@ async function main() {
   }
   if (argv[0] === 'start' || argv[0] === 'connect') argv.shift();
   if (argv[0] === '--version' || argv[0] === '-v' || argv[0] === 'version') {
-    console.log(packageVersion());
+    const identity = buildIdentity();
+    if (argv.includes('--verbose')) {
+      console.log(`Package: ${identity.packageName}`);
+      console.log(`Version: ${identity.version}`);
+      console.log(`Build revision: ${identity.revision || 'unknown'}`);
+      console.log(`Build channel: ${identity.channel}`);
+    } else console.log(identity.version);
     return;
   }
   if (argv[0] === 'help') argv[0] = '--help';
@@ -5060,7 +4983,7 @@ async function main() {
   }
 
   const root = realDir(args.root ?? process.env.CODEXPRO_ROOT ?? process.cwd());
-  let profile = args.noProfile ? {} : loadWorkspaceProfile(root);
+  let profile = args.noProfile ? userDefaultProfile() : loadWorkspaceProfile(root);
   profile = await maybeConfigureFirstRun(root, args, profile);
   if (!connectionTest && optionBool(args, profile, 'connectionTest', ['CODEXPRO_CONNECTION_TEST'], false)) {
     connectionTest = true;
@@ -5132,10 +5055,9 @@ async function main() {
   const toolMode = optionValue(args, profile, 'toolMode', ['CODEXPRO_TOOL_MODE'], 'standard');
   const widgetDomain = optionValue(args, profile, 'widgetDomain', ['CODEXPRO_WIDGET_DOMAIN'], 'https://rebel0789.github.io');
   const toolCards = optionBool(args, profile, 'toolCards', ['CODEXPRO_TOOL_CARDS'], false);
-  const syncCallDeadline = syncCallDeadlineOption(args, profile);
-  const continuation = await continuationProfileEntries(args, profile);
   const analysisEnabled = optionBool(args, profile, 'analysisEnabled', ['CODEXPRO_ANALYSIS'], true);
   const artifactExportEnabled = optionBool(args, profile, 'artifactExportEnabled', ['CODEXPRO_ARTIFACT_EXPORT'], false);
+  const localServiceProbeEnabled = optionBool(args, profile, 'localServiceProbeEnabled', ['CODEXPRO_LOCAL_SERVICE_PROBE'], false);
   const goalsEnabled = optionBool(args, profile, 'goalsEnabled', ['CODEXPRO_GOALS'], false);
   const codeGraphEnabled = optionBool(args, profile, 'codeGraphEnabled', ['CODEXPRO_CODEGRAPH'], false);
   const codeGraphExecutable = String(optionValue(args, profile, 'codeGraphExecutable', ['CODEXPRO_CODEGRAPH_EXECUTABLE'], '') ?? '').trim();
@@ -5175,19 +5097,10 @@ async function main() {
     CODEXPRO_TOOL_MODE: toolMode,
     CODEXPRO_WIDGET_DOMAIN: widgetDomain,
     CODEXPRO_TOOL_CARDS: toolCards ? '1' : '0',
-    CODEXPRO_SYNC_CALL_DEADLINE_MODE: syncCallDeadline.mode,
-    CODEXPRO_SYNC_CALL_DEADLINE_MS: String(syncCallDeadline.deadlineMs),
-    CODEXPRO_CONTINUATION_ENABLED: continuation.continuationEnabled ? '1' : '0',
-    CODEXPRO_CONTINUATION_BROWSER: continuation.continuationBrowser,
-    CODEXPRO_CONTINUATION_PROFILE: continuation.continuationProfile,
-    CODEXPRO_CONTINUATION_COOLDOWN_MS: String(continuation.continuationCooldownMs),
-    CODEXPRO_CONTINUATION_MAX_DISPATCHES: String(continuation.continuationMaxDispatches),
-    CODEXPRO_CONTINUATION_UNEXPECTED_GRACE_MS: String(continuation.continuationUnexpectedGraceMs),
-    CODEXPRO_CONTINUATION_NOTIFICATIONS_ENABLED: continuation.continuationNotificationsEnabled ? '1' : '0',
-    CODEXPRO_CONTINUATION_TELEGRAM_ENABLED: continuation.continuationTelegramEnabled ? '1' : '0',
     CODEXPRO_CONNECTION_TEST: connectionTest ? '1' : '0',
     CODEXPRO_ANALYSIS: analysisEnabled ? '1' : '0',
     CODEXPRO_ARTIFACT_EXPORT: artifactExportEnabled ? '1' : '0',
+    CODEXPRO_LOCAL_SERVICE_PROBE: localServiceProbeEnabled ? '1' : '0',
     CODEXPRO_GOALS: goalsEnabled ? '1' : '0',
     CODEXPRO_CODEGRAPH: codeGraphEnabled ? '1' : '0',
     CODEXPRO_CODEGRAPH_ARGS: codeGraphArgs,
@@ -5228,7 +5141,6 @@ async function main() {
     labelValue('Mode', `${mode}  tools=${toolMode}  write=${write}  bash=${bash}`),
     labelValue('Bash transcript', bashTranscript),
     labelValue('Bash runtime', `${bashRuntime}${bashExecutable ? ` (${bashExecutable})` : ''}`),
-    labelValue('Sync deadline', syncCallDeadline.mode === 'observe' ? 'Unlimited (observe only)' : `${syncCallDeadline.deadlineMs / 60_000} min`),
     labelValue('Codex sessions', codexSessions),
     ...(bashSession ? [labelValue('Bash session', `${bashSession}${requireBashSession ? ' required' : ''}`)] : []),
     labelValue('Local URL', `http://${host}:${port}/mcp`),
@@ -5278,12 +5190,10 @@ async function main() {
     bashSession,
     requireBashSession,
     toolCards,
-    syncCallDeadlineMode: syncCallDeadline.mode,
-    syncCallDeadlineMs: syncCallDeadline.deadlineMs,
-    ...continuation,
     connectionTest,
     analysisEnabled,
     artifactExportEnabled,
+    localServiceProbeEnabled,
     goalsEnabled,
     codeGraphEnabled,
     lspEnabled,
@@ -5328,7 +5238,7 @@ async function main() {
       const cleanupHealth = () => {
         if (cleaned) return;
         cleaned = true;
-        try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch {}
+        removeOwnedOpenAiHealthRoot(tmpRoot);
       };
       const tunnelArgs = [
         'run',
@@ -5349,7 +5259,7 @@ async function main() {
       tunnelChild.once('error', cleanupHealth);
       try {
         const ready = await waitForOpenAiTunnelReady(healthUrlFile, tunnelChild);
-        return { child: tunnelChild, healthBase: ready.healthBase, uiUrl: ready.uiUrl, cleanupHealth };
+        return { child: tunnelChild, healthBase: ready.healthBase, uiUrl: ready.uiUrl, healthRoot: tmpRoot, cleanupHealth };
       } catch (error) {
         if (tunnelChild.exitCode === null && tunnelChild.signalCode === null) killProcess(tunnelChild);
         cleanupHealth();
@@ -5376,6 +5286,7 @@ async function main() {
     }
     cloudflared = tunnelReady.child;
     activeTunnelCleanup = tunnelReady.cleanupHealth;
+    runtimeOptions.openAiHealthRoot = tunnelReady.healthRoot;
     cleanupTunnelCredentials = () => {
       openAiSupervisorStopping = true;
       activeTunnelCleanup();
@@ -5404,6 +5315,7 @@ async function main() {
         const recovered = await startOpenAiTunnel();
         cloudflared = recovered.child;
         activeTunnelCleanup = recovered.cleanupHealth;
+        updateRuntimeOpenAiHealthRoot(root, runtimeOptions.runtimeGenerationId, recovered.healthRoot);
         return recovered;
       },
       (state) => updateRuntimeTransportState(root, runtimeOptions.runtimeGenerationId, state),

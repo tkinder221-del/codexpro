@@ -11,13 +11,13 @@ CodexPro Full is the `PracticalSwan/codexpro` fork. The installed command is sti
 Use the GitHub Release artifact when you want the latest tagged/stable build:
 
 ```bash
-npm install -g https://github.com/PracticalSwan/codexpro/releases/download/v0.32.4/codexpro-full-0.32.4.tgz
+npm install -g https://github.com/PracticalSwan/codexpro/releases/download/v0.34.0/codexpro-full-0.34.0.tgz
 codexpro --version
 ```
 
 ### Latest `main`
 
-`main` can contain verified fixes listed under **Unreleased** after a GitHub Release is tagged. Stable **0.32.4 already includes the long-lived OpenAI tunnel heartbeat/child-recovery fix and the current continuity/isolation hardening.** Current post-0.32.4 `main` additionally carries verified maintenance such as explicit Windows Bash runtime selection, interruption/orphan-aware local handoff recovery with default remote-mutation blocking, and bounded HTTP request-correlation/diagnostic hardening. Build from source only when you specifically need those later Unreleased changes:
+Release **0.34.0** is available as the tagged GitHub artifact above. It includes Plan 47's simpler setup/status and Plan 48's complete retirement of obsolete per-tool-call deadlines. Build main only for future unreleased work; independent timeouts and manual startup remain.
 
 ```bash
 git clone https://github.com/PracticalSwan/codexpro.git
@@ -27,11 +27,19 @@ git pull --ff-only origin main
 npm install
 npm run build
 npm pack
-npm install -g ./codexpro-full-0.32.4.tgz
+npm install -g ./codexpro-full-0.34.0.tgz
 codexpro --version
 ```
 
+Release 0.34.0 includes the previously unreleased 0.33.9 UI and dependency improvements, the ownership-safe tunnel and Windows process fixes, and deadline-feature retirement. The operator must start CodexPro manually after installation.
+
+When an existing runtime uses the configured port, `codexpro doctor` reports the identity-verified running instance from that workspace as a warning rather than an unrelated conflict. Do not launch a second instance; use `codexpro status --root <workspace>` to check the current runtime.
+
 Do **not** install `codexpro@latest` from npm expecting CodexPro Full; that is the upstream distribution, not this fork.
+
+### Optional per-user Local Service Probe preference (0.33.2+)
+
+The probe remains **off by default** in the distributed package and for every user who has not opted in. To enable it for only your own operating-system account and all workspace profiles you create later, run `codexpro settings user-default --local-service-probe on`. This saves a preference under your account's CodexPro home; it does not change the machine-wide or packaged defaults or retroactively rewrite other users' profiles. Use `codexpro settings set --local-service-probe on --tool-mode full` in each existing profile you want to enable. An individual workspace can override the user preference with `codexpro settings set --local-service-probe off`; an explicit launch flag also overrides it. To restore your account's default-off behavior for new profiles, run `codexpro settings user-default --local-service-probe off`. Changes affect the next launch; the probe is Full-mode only and restricted to explicit loopback GET/HEAD without credentials or redirects.
 
 ## 2. Prerequisites
 
@@ -103,7 +111,7 @@ When `open_workspace` returns a `workspace_id`, keep using that ID explicitly af
 
 ## 6. Recommended: multiple ChatGPT sessions, multiple projects
 
-For most users, run **one CodexPro runtime** and allow every project you want that runtime to serve. Stable 0.32.4 includes the current multi-session/isolation fixes. If later changes are listed under **Unreleased** in `CHANGELOG.md`, use current `main` only when you specifically need those newer changes.
+For most users, run **one CodexPro runtime** and allow every project you want that runtime to serve. Release 0.34.0 includes simplified local setup and the current multi-session/isolation fixes and maintenance hardening, including ownership-safe tunnel scratch cleanup. If later changes are listed under **Unreleased** in `CHANGELOG.md`, use current `main` only when you specifically need those newer changes.
 
 Example:
 
@@ -205,7 +213,7 @@ Confirm only one live CodexPro launcher owns a given OpenAI tunnel ID. In 0.32.4
 - Keep CodexPro authentication enabled.
 - Allow only repositories you actually want ChatGPT to access.
 - Keep Git push disabled unless you explicitly need it.
-- On post-0.32.4 `main`, keep local handoff remote mutation blocked unless the exact workflow explicitly authorizes `--allow-remote-mutations`; reconcile interrupted/orphaned receipts before retrying material side effects.
+- In 0.33.0 and later, keep local handoff remote mutation blocked unless the exact workflow explicitly authorizes `--allow-remote-mutations`; reconcile interrupted/orphaned receipts before retrying material side effects.
 - Never reuse one OpenAI tunnel ID across two simultaneous CodexPro runtimes.
 - Never paste runtime API keys, MCP bearer tokens, private keys, or `.env` contents into chat.
 
@@ -221,11 +229,13 @@ git pull --ff-only origin main
 npm install
 npm run build
 npm pack
-npm install -g ./codexpro-full-0.32.4.tgz
+npm install -g ./codexpro-full-0.34.0.tgz
 codexpro --version
 codexpro doctor
 ```
 
 Saved workspace profiles under `~/.codexpro` remain separate from the package installation.
+
+For local operator evidence, use `codexpro --version --verbose`, `codexpro status --json`, and `codexpro profiles show --current --json`. These commands are read-only; the guarded `codexpro stop` command is the only new lifecycle action and requires exact recorded process/start-identity ownership. Standard/Full MCP sessions also expose bounded notebook/table/dependency readers and enriched workspace/verification evidence. The optional local-service probe remains disabled unless you explicitly enable `CODEXPRO_LOCAL_SERVICE_PROBE=1` for a Full-mode launch.
 
 For feature details and security boundaries, continue with [README.md](README.md), [FEATURES.md](FEATURES.md), [FAQ.md](FAQ.md), and [SECURITY.md](SECURITY.md).

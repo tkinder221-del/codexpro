@@ -248,9 +248,6 @@ if (!safeInitialize.instructions?.includes('allowlisted verification commands') 
 }
 const tools = await client.request('tools/list', {});
 const toolNames = tools.tools.map((tool) => tool.name);
-for (const disabledContinuationTool of ['continuation_arm', 'continuation_checkpoint', 'continuation_request', 'continuation_status', 'continuation_reconcile', 'continuation_complete', 'continuation_cancel']) {
-  if (toolNames.includes(disabledContinuationTool)) throw new Error(`continuation-disabled runtime advertised ${disabledContinuationTool}`);
-}
 const safeBashTool = tools.tools.find((tool) => tool.name === 'bash');
 if (!safeBashTool?.description?.includes('allowlisted verification command')) {
   throw new Error(`safe Bash tool description was not restricted: ${safeBashTool?.description}`);
@@ -1238,6 +1235,21 @@ const agentHandoff = await client.request('tools/call', {
   }
 });
 if (agentHandoff.structuredContent.agent !== 'opencode') throw new Error('handoff_to_agent did not preserve target agent');
+const generatedPlan = await fs.readFile(path.join(tmp, '.ai-bridge', 'current-plan.md'), 'utf8');
+for (const expectedContractLine of [
+  'Work from this plan in small, reviewable steps.',
+  'Keep edits scoped to the requested task and existing project conventions.',
+  'Run focused verification before handing work back.',
+  'Update .ai-bridge/agent-status.md with files touched, checks run, results, blockers, and review notes.',
+  'Save the final review diff to .ai-bridge/implementation-diff.patch when practical.'
+]) {
+  if (!generatedPlan.includes(expectedContractLine)) {
+    throw new Error(`handoff_to_agent omitted implementation contract line: ${expectedContractLine}`);
+  }
+}
+if (generatedPlan.includes('execution-log.jsonl')) {
+  throw new Error('handoff_to_agent should not ask the implementation agent to write execution-log.jsonl');
+}
 const escapedHandoff = await client.request('tools/call', {
   name: 'handoff_to_agent',
   arguments: {

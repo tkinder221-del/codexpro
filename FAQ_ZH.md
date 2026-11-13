@@ -19,7 +19,7 @@ CodexPro 不解锁自定义 MCP App，不解锁模型，不绕过账号限制，
 Recommended GitHub Release install:
 
 ```bash
-npm install -g https://github.com/PracticalSwan/codexpro/releases/download/v0.32.4/codexpro-full-0.32.4.tgz
+npm install -g https://github.com/PracticalSwan/codexpro/releases/download/v0.34.0/codexpro-full-0.34.0.tgz
 ```
 
 Or build from the PracticalSwan source checkout:
@@ -31,10 +31,26 @@ git checkout main
 npm install
 npm run build
 npm pack
-npm install -g ./codexpro-full-0.32.4.tgz
+npm install -g ./codexpro-full-0.34.0.tgz
 ```
 
-Then run `codexpro setup` in the workspace you want ChatGPT to access. Daily startup is `codexpro start`. The tagged tarball is stable 0.32.4 and includes the verified long-lived OpenAI tunnel recovery and current continuity/isolation fixes. Upstream `codexpro@latest` is not the fork release.
+0.33.9 简化本机认证的 /setup 页面：显示关键状态和下次启动的设置，按连接类型显示字段、折叠高级设置，支持保存和撤销操作，OpenAI 使用 Tunnel ID。配置仅在用户手动重新启动后生效。并更新兼容依赖。
+
+0.33.8 修复外部 `codexpro stop` 后 OpenAI Tunnel 健康检查临时目录可能残留的问题。运行状态只记录系统临时目录直属层级下经过校验的 `codexpro-openai-tunnel-*` 目录；在已验证 launcher/runtime 进程树结束后只删除该目录，Tunnel recovery 会刷新路径，Windows 临时删除锁会有界重试，非归属路径不会被删除。
+
+0.33.7 修复 OpenAI Tunnel 租约在 Windows PID 重用后的错误占用；本地 handoff 在直接子进程退出后会有界完成，即使后代进程仍持有输出管道；`execution-log.jsonl` 继续由 CodexPro runner 独占写入。发布验证新增打包后干净安装检查，并更新兼容范围内依赖以清除当前高危审计告警。
+
+0.33.6 修复 Windows 关闭竞态：启动器退出后，`codexpro stop` 会有界等待已验证的 MCP 子进程结束，再清理运行状态；PID 与启动身份校验保持不变。
+
+0.33.5 使 Git 工作区检查遵守忽略规则，CLI 安装帮助指向对应 GitHub Release，Windows 压力测试清理临时目录，CI 与发布验证固定使用 Ubuntu 24.04。
+
+In 0.33.4, structured Job and Durable Goal stores tolerate longer temporary Windows file locks with bounded five-second atomic replacement retries. Other errors still fail immediately; process ownership and cancellation safeguards are unchanged.
+
+In 0.33.3, `codexpro doctor` distinguishes an existing identity-verified runtime in the same workspace from an unrelated port collision, reports a warning instead of a false blocker, and never starts or stops the runtime.
+
+In 0.33.2, Artifact Export diagnostics check the real `export_file` tool. The Local Service Probe stays off by default globally; only your OS account can opt into inherited future-profile defaults using `codexpro settings user-default --local-service-probe on`.
+
+The tagged tarball is CodexPro Full 0.34.0, incorporating the 0.33.9 operator improvements and retiring configurable synchronous call deadlines. Historical 0.33.x notes describe earlier releases. Upstream codexpro@latest is not this fork.
 
 ## CodexPro Full update
 
@@ -46,7 +62,7 @@ git pull origin main
 npm install
 npm run build
 npm pack
-npm install -g ./codexpro-full-0.32.4.tgz
+npm install -g ./codexpro-full-0.34.0.tgz
 codexpro --version
 ```
 

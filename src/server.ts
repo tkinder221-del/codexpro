@@ -13,8 +13,8 @@ import { runHooks } from "./hooks/runner.js";
 import { z } from "zod";
 import type { CodexProConfig } from "./config.js";
 import { CODEXPRO_PACKAGE_NAME, CODEXPRO_VERSION } from "./packageIdentity.js";
-import { withSyncCallDeadline } from "./deadline.js";
-import { classifyExecutionHint, executionHintPublic, executionThresholds } from "./executionGuidance.js";
+import { buildIdentity } from "./buildIdentity.js";
+import { classifyExecutionHint, executionHintPublic } from "./executionGuidance.js";
 import { WorkspaceManager, PathGuard, CodexProError, type Workspace, type WorkspaceRegistry } from "./guard.js";
 import { repoTree, readTextFile, writeTextFile, editTextFile, ensureAiBridge, withFileWriteLocks } from "./fsOps.js";
 import { viewWorkspaceImage } from "./imageOps.js";
@@ -38,7 +38,7 @@ import { TelemetryRegistry } from "./telemetry.js";
 import { ActivityStore } from "./activity/store.js";
 import { ActivityRegistry } from "./activity/registry.js";
 import type { ActivityKind, ActivityStatus } from "./activity/types.js";
-import { connectionDiagnostics, toolSurfaceDiagnostics, runToolTimeProbe } from "./diagnosticsOps.js";
+import { connectionDiagnostics, toolSurfaceDiagnostics } from "./diagnosticsOps.js";
 import { WorkspaceProcessManager } from "./processOps.js";
 import { discoverTrustedChecks, runChecks, verifyChanges } from "./checksOps.js";
 import { readMany, searchMany, gatherContextV2, prepareSubtaskContext } from "./contextOps.js";
@@ -55,15 +55,20 @@ import { preflightChanges } from "./preflightOps.js";
 import { gitStage, gitCommit, gitPush } from "./gitWriteOps.js";
 import { inspectArchive, extractArchive } from "./archiveOps.js";
 import { readDocument } from "./documentOps.js";
+import { readNotebook } from "./notebookOps.js";
+import { inspectTable } from "./tableOps.js";
+import { inspectDependency } from "./dependencyOps.js";
+import { probeLocalService } from "./localServiceProbe.js";
+import { explainCapabilities } from "./capabilityExplain.js";
+import { composeWorkspaceBriefing } from "./workspaceBriefing.js";
 import { exportWorkspaceFile } from "./exportOps.js";
 import { GoalStore } from "./goals/store.js";
+import { knowledgeStatus, knowledgeSearch, knowledgeRemember } from "./knowledgeOps.js";
+import { selectSkill, createSkill, recordSkill } from "./skillRouterOps.js";
+import { integrationPlan, integrationRecord } from "./integrationRouterOps.js";
 import { JobStore, publicJobRecord } from "./jobs/store.js";
 import { BatchStore } from "./batches/store.js";
 import { publicBatchRecord } from "./batches/types.js";
-import { ContinuationStore, type ContinuationBinding } from "./continuation/store.js";
-import { publicContinuationRecord, TERMINAL_CONTINUATION_STATES } from "./continuation/types.js";
-import { armContinuation, checkpointContinuation, requestContinuation, reconcileContinuationManualTurn, completeContinuation, cancelContinuation, continuationStatus, reassociateContinuationSession } from "./continuation/ops.js";
-import { recordContinuationHeartbeat } from "./continuation/watchdog.js";
 import { cancelJob, reconcileJob, resumeJob } from "./jobs/runner.js";
 import { registerVerificationJobProducer, startChecksJob, startVerificationJob } from "./jobs/verification.js";
 import { proposeGoal, approveGoal, startGoal, pauseGoal, resumeGoal, cancelGoal } from "./goals/runner.js";
@@ -319,8 +324,6 @@ function isContextPath(config: CodexProConfig, relPath: string): boolean {
   return normalized === contextDir || normalized.startsWith(`${contextDir}/`);
 }
 
-function continuationFeatureEnabled(config: CodexProConfig): boolean { return (config as CodexProConfig & { continuationEnabled?: boolean }).continuationEnabled === true; }
-
 function assertWriteToolAllowed(config: CodexProConfig, relPath: string): void {
   if (config.writeMode === "workspace") return;
   if (config.writeMode === "handoff" && isContextPath(config, relPath)) return;
@@ -338,8 +341,6 @@ function recordResilienceTelemetry(server: McpServer, name: string, args: any, r
   if (!telemetry) return;
   const structured = result?.structuredContent;
   if (!structured || typeof structured !== "object" || Array.isArray(structured)) return;
-  if (structured.deadlineYielded === true) telemetry.record({ stage: "resilience", status: "degraded", event: "deadline_yield", tool: name, reason: "shared synchronous deadline yielded before all required work completed" });
-  if (structured.deadlineLimitedChild === true) telemetry.record({ stage: "resilience", status: "degraded", event: "deadline_limited_child", tool: name, reason: "owned child timeout was limited by the remaining synchronous deadline" });
   if (structured.execution_hint?.class === "async_preferred" || structured.routing?.recommendedExecution === "async") telemetry.record({ stage: "resilience", status: "ok", event: "async_routed", tool: name, reason: "deterministic execution guidance prefers a durable async primitive" });
   const batch = structured.batch;
   if (typeof args?.continuation_token === "string" && batch && typeof batch === "object") telemetry.record({ stage: "resilience", status: "ok", event: "batch_continued", tool: name, entityId: String(batch.id ?? args.continuation_token), reason: "foreground batch continuation advanced" });
@@ -371,9 +372,7 @@ function registerWrappedToolCompat(
     telemetry?.record({ stage: "request_arrival", status: "ok", tool: name, backend: "mcp_tool" });
     telemetry?.record({ stage: "dispatch", status: "ok", tool: name, backend: "mcp_tool" });
     try {
-      const result = await withSyncCallDeadline(config.syncCallDeadlineMode, config.syncCallDeadlineMs, async () =>
-        tagToolResult(await handler(args ?? {}), name, options)
-      );
+      const result = tagToolResult(await handler(args ?? {}), name, options);
       const status = result?.isError ? "error" : "ok";
       telemetry?.record({
         stage: "completion",
@@ -406,7 +405,6 @@ const MINIMAL_TOOL_NAMES = [
   "effective_policy",
   "connection_diagnostics",
   "tool_surface_diagnostics",
-  "tool_time_probe",
   "local_telemetry",
   "activity_log",
   "operation_status",
@@ -433,6 +431,14 @@ const MINIMAL_TOOL_NAMES = [
 
 const STANDARD_TOOL_NAMES = [
   ...MINIMAL_TOOL_NAMES,
+  "integration_plan",
+  "integration_record",
+  "skill_select",
+  "skill_create",
+  "skill_record",
+  "knowledge_status",
+  "knowledge_search",
+  "knowledge_remember",
   "start_workspace_process",
   "workspace_process_status",
   "read_workspace_process_output",
@@ -444,13 +450,6 @@ const STANDARD_TOOL_NAMES = [
   "read_job_output",
   "cancel_job",
   "resume_job",
-  "continuation_arm",
-  "continuation_checkpoint",
-  "continuation_request",
-  "continuation_status",
-  "continuation_reconcile",
-  "continuation_complete",
-  "continuation_cancel",
   "inspect_workspace",
   "tree",
   "search",
@@ -458,6 +457,9 @@ const STANDARD_TOOL_NAMES = [
   "code_intelligence_status",
   "inspect_archive",
   "read_document",
+  "read_notebook",
+  "inspect_table",
+  "inspect_dependency",
   "read_many",
   "search_many",
   "gather_context",
@@ -475,12 +477,19 @@ const STANDARD_TOOL_NAMES = [
 ] as const;
 
 const FULL_TOOL_NAMES = [
+  "integration_plan",
+  "integration_record",
+  "skill_select",
+  "skill_create",
+  "skill_record",
+  "knowledge_status",
+  "knowledge_search",
+  "knowledge_remember",
   SUPERTOOL_NAME,
   "server_config",
   "effective_policy",
   "connection_diagnostics",
   "tool_surface_diagnostics",
-  "tool_time_probe",
   "local_telemetry",
   "activity_log",
   "operation_status",
@@ -499,6 +508,10 @@ const FULL_TOOL_NAMES = [
   "code_intelligence_status",
   "inspect_archive",
   "read_document",
+  "read_notebook",
+  "inspect_table",
+  "inspect_dependency",
+  "probe_local_service",
   "read_many",
   "search_many",
   "gather_context",
@@ -533,13 +546,6 @@ const FULL_TOOL_NAMES = [
   "read_job_output",
   "cancel_job",
   "resume_job",
-  "continuation_arm",
-  "continuation_checkpoint",
-  "continuation_request",
-  "continuation_status",
-  "continuation_reconcile",
-  "continuation_complete",
-  "continuation_cancel",
   "goal_status",
   "list_goals",
   "propose_goal",
@@ -595,12 +601,6 @@ const CONNECTION_TEST_HIDDEN_TOOLS = new Set<string>([
   "stop_workspace_process",
   "cancel_job",
   "resume_job",
-  "continuation_arm",
-  "continuation_checkpoint",
-  "continuation_request",
-  "continuation_reconcile",
-  "continuation_complete",
-  "continuation_cancel",
   "codegraph_sync",
   "git_stage",
   "git_commit",
@@ -624,11 +624,6 @@ const BASH_DEPENDENT_TOOL_NAMES = new Set<string>([
   "resume_job"
 ]);
 
-const CONTINUATION_TOOL_NAMES = new Set<string>([
-  "continuation_arm", "continuation_checkpoint", "continuation_request", "continuation_status",
-  "continuation_reconcile", "continuation_complete", "continuation_cancel"
-]);
-
 const GOAL_TOOL_NAMES = new Set<string>([
   "goal_status", "list_goals", "propose_goal", "approve_goal", "start_goal",
   "pause_goal", "resume_goal", "cancel_goal", "review_goal", "project_goal"
@@ -648,12 +643,6 @@ export function toolNamesForMode(config: CodexProConfig): string[] {
       : config.toolMode === "minimal"
         ? [...MINIMAL_TOOL_NAMES]
         : [...STANDARD_TOOL_NAMES];
-  if (!continuationFeatureEnabled(config)) {
-    for (const continuationTool of CONTINUATION_TOOL_NAMES) {
-      const toolIndex = names.indexOf(continuationTool);
-      if (toolIndex !== -1) names.splice(toolIndex, 1);
-    }
-  }
   if (config.bashMode === "off") {
     for (const bashTool of BASH_DEPENDENT_TOOL_NAMES) {
       const toolIndex = names.indexOf(bashTool);
@@ -669,6 +658,7 @@ export function toolNamesForMode(config: CodexProConfig): string[] {
   if (!config.allowGitPush) { const pushIndex = names.indexOf("git_push"); if (pushIndex !== -1) names.splice(pushIndex, 1); }
   if (!config.codeGraphEnabled || config.writeMode !== "workspace") { const syncIndex = names.indexOf("codegraph_sync"); if (syncIndex !== -1) names.splice(syncIndex, 1); }
   if (!config.artifactExportEnabled) { const exportIndex = names.indexOf("export_file"); if (exportIndex !== -1) names.splice(exportIndex, 1); }
+  if (!config.localServiceProbeEnabled) { const probeIndex = names.indexOf("probe_local_service"); if (probeIndex !== -1) names.splice(probeIndex, 1); }
   const goalsAvailable = config.goalsEnabled && config.writeMode === "workspace" && config.bashMode !== "off" && !config.connectionTest && goalPlatformStatus(config.goalDir).available;
   if (!goalsAvailable) {
     for (const goalTool of GOAL_TOOL_NAMES) { const goalIndex = names.indexOf(goalTool); if (goalIndex !== -1) names.splice(goalIndex, 1); }
@@ -706,13 +696,13 @@ export function registeredToolNames(server: McpServer): string[] {
 }
 
 function shouldRegisterTool(config: CodexProConfig, name: string): boolean {
-  if (CONTINUATION_TOOL_NAMES.has(name) && !continuationFeatureEnabled(config)) return false;
   if (config.connectionTest && CONNECTION_TEST_HIDDEN_TOOLS.has(name)) return false;
   if (BASH_DEPENDENT_TOOL_NAMES.has(name) && config.bashMode === "off") return false;
   if (["write", "edit", "prepare_change_set", "apply_change_set", "revert_operation", "restore_checkpoint", "apply_patch", "import_file", "extract_archive", "git_stage", "git_commit", "git_push"].includes(name) && config.writeMode !== "workspace") return false;
   if (name === "git_push" && !config.allowGitPush) return false;
   if (name === "codegraph_sync" && (!config.codeGraphEnabled || config.writeMode !== "workspace")) return false;
   if (name === "export_file" && !config.artifactExportEnabled) return false;
+  if (name === "probe_local_service" && (!config.localServiceProbeEnabled || config.toolMode !== "full")) return false;
   if (GOAL_TOOL_NAMES.has(name)) {
     if (!config.goalsEnabled || config.writeMode !== "workspace" || config.bashMode === "off" || config.connectionTest) return false;
     if (!goalPlatformStatus(config.goalDir).available) return false;
@@ -768,20 +758,8 @@ export function serverInstructions(config: CodexProConfig): string {
       : config.bashMode === "full"
         ? "5. Full Bash access is enabled for this explicitly trusted local workspace. CodexPro's safe-Bash allowlist and command-shape restrictions do not apply. Use shell commands needed for the user's request, including project scripts, Git operations, and local developer CLIs, while respecting user, project, and platform safety/authorization boundaries. Prefer dedicated CodexPro tools when they provide the same operation more precisely."
         : "5. Bash is in safe mode. Use it only for meaningful allowlisted verification commands such as npm test, npm run build, lint, typecheck, or an existing project script.";
-  const routingThresholds = executionThresholds(config.syncCallDeadlineMs);
-  const referenceMinutes = Number((config.syncCallDeadlineMs / 60_000).toFixed(2));
-  const deadlineInstruction = config.syncCallDeadlineMode === "observe"
-    ? `Deadline routing: Tool-time awareness is Unlimited/observe for host-window discovery. Keep elapsed-time awareness and conservative long-work routing from the ${referenceMinutes} minute finite reference; observe mode is discovery-only, not permission to keep ordinary mutating calls open indefinitely.`
-    : `Deadline routing: Tool-time awareness is bounded at ${referenceMinutes} minutes (${config.syncCallDeadlineMs} ms). This is a transport boundary for one blocking tool call, never a task-quality target.`;
-  const deadlineScopeInstruction = "Deadline scope: the configured synchronous deadline is per MCP tool call and restarts for each tool invocation. It does not measure the whole ChatGPT turn or host tool-access window, so do not wait for this per-call timer to checkpoint or wrap up.";
-  const routingInstruction = `Execution routing: Never rush, omit required work, reduce scope/review/tests/safety, or claim completion to fit one call. Routing cutoffs are sync-preferred <= ${Number((routingThresholds.syncPreferredMs / 60_000).toFixed(2))} minutes and async-preferred >= ${Number((routingThresholds.asyncPreferredMs / 60_000).toFixed(2))} minutes. Use start_workspace_process for long shell commands, start_checks/start_verification for long verification, and Durable Goals for substantial multi-stage work with dependency, isolation, review, or projection needs.`;
-  const progressInstruction = "Continuation discipline: When work spans calls, preserve the full goal, complete one coherent phase, persist material progress/evidence, then continue. Poll status only when a condition may have changed; use condition-based purposeful polling rather than rapid busy-wait loops.";
-  const continuationInstruction = config.continuationEnabled
-    ? "Task continuation: continuationEnabled=true. Use continuation_arm only for a substantial task likely to span MCP/model calls. Use continuation_checkpoint after each coherent material milestone and before starting a long or high-variance phase; do not wait for a deadline yield or host cutoff to save semantic state. Register only bounded intents that reference recorded remaining work. Actual long work belongs in proc_*, job_*, goal_*, or batch_* state. A configured deadline is a continuation boundary, never a quality target. Before a truthful semantic yield with work remaining, checkpoint then continuation_request. Browser/Telegram dispatch is user-gated: continuation must not auto-send and must not wait or busy-poll merely to trigger another turn. After acceptance criteria and required verification are complete, call continuation_complete; explicit stop/cancel of the overall goal uses continuation_cancel."
-    : "Task continuation: continuationEnabled=false. Do not arm continuation, do not launch browser setup, and do not request Telegram setup. No semantic continuation checkpoint is saved automatically while continuation is disabled. Continue using deadline-aware proc_*, job_*, goal_*, and batch_* durable execution where appropriate; continuation being disabled never changes requested scope, quality, review, verification, or safety requirements.";
-  const continuationRecoveryInstruction = config.continuationEnabled
-    ? "Continuation recovery: on a user-dispatched continuation turn, call continuation_status first. Check terminal/revision state and the current runtime generation/deadline/transport, recover canonical remaining work and durable subsystem state plus selectedContinuationIntentId, avoid redoing verified work, and resume only the recorded goal. A focused intent changes priority only within recorded remaining work. If continuation_status reports manualTurnPending, use the user prompt already visible to ChatGPT and call continuation_reconcile with exactly one disposition: resume for ordinary continuation, redirect for changed priorities within the same goal, supersede for a materially new task, or cancel for explicit stop/cancel; ambiguity remains paused. Never recreate terminal continuation state merely because the fixed continuation message arrived."
-    : "";
+  const routingInstruction = "Execution routing: Use managed workspace processes for high-variance shell commands, structured verification jobs for substantial checks, and durable Goals for multi-stage review work. Do not assume the host grants unlimited synchronous execution.";
+  const progressInstruction = "Long-work discipline: When work spans calls, preserve the full goal, complete one coherent phase, persist material progress/evidence through the appropriate task snapshot, process, job, batch, Goal, or Git state, then continue. Poll status only when a condition may have changed; use condition-based purposeful polling rather than rapid busy-wait loops.";
   const inspectionInstruction =
     config.bashMode === "full"
       ? "3. Inspect with tree, search, read, and dedicated Git tools when they are more precise. Full Bash may also be used for inspection when the user's task benefits from shell or local CLI behavior."
@@ -796,12 +774,8 @@ export function serverInstructions(config: CodexProConfig): string {
     inspectionInstruction,
     editInstruction,
     bashInstruction,
-    deadlineInstruction,
-    deadlineScopeInstruction,
     routingInstruction,
     progressInstruction,
-    continuationInstruction,
-    continuationRecoveryInstruction,
     "6. Keep tool calls minimal. Prefer one targeted search plus show_changes instead of repeated broad inspection calls.",
     config.codexSessions !== "off"
       ? `7. Codex session history access is enabled in ${config.codexSessions} mode. Use it only when the user asks for local Codex session history.`
@@ -1231,7 +1205,6 @@ ${options.plan.trim()}
 - Run focused verification before handing work back.
 - Update ${options.statusPath} with files touched, checks run, results, blockers, and review notes.
 - Save the final review diff to ${options.diffPath} when practical.
-- Append notable execution events to ${options.executionLogPath} when the implementation agent supports logging.
 `;
 }
 
@@ -1374,8 +1347,6 @@ export function createCodexProServer(
     activityRegistry?: ActivityRegistry;
     activeSessionCount?: () => number;
     runtimeState?: CodexProRuntimeState;
-    transportSessionId?: () => string | undefined;
-    isTransportSessionActive?: (sessionId: string) => boolean;
   } = {}
 ): McpServer {
   const policyRegistry = new WorkspacePolicyRegistry(globalConfig);
@@ -1438,35 +1409,6 @@ export function createCodexProServer(
   };
   const jobStore = new JobStore({ baseDir: config.jobDir, maxJobs: config.maxOperationReceipts, maxOutputBytes: config.maxOperationBytes, maxReadBytes: config.maxProcessReadBytes });
   const batchStore = new BatchStore(config.batchDir, Math.max(config.maxOperationBytes, 64 * 1024), config.maxOperationReceipts);
-  const continuationStore = new ContinuationStore(path.join(path.dirname(config.operationDir), "continuation"), config.maxOperationReceipts);
-  const authoritativeTransportSessionId = (): string | undefined => {
-    const value = options.transportSessionId?.()?.trim();
-    return value || undefined;
-  };
-  const continuationBinding = (workspace: Workspace, requestedSessionId?: string): ContinuationBinding => {
-    const sessionId = authoritativeTransportSessionId() ?? (requestedSessionId?.trim() || undefined);
-    return { workspace, ...(sessionId ? { sessionId } : {}) };
-  };
-  const recoverContinuationBinding = async (workspace: Workspace, continuationId: string, requestedSessionId?: string): Promise<ContinuationBinding> => {
-    const sessionId = authoritativeTransportSessionId();
-    if (!sessionId) return continuationBinding(workspace, requestedSessionId);
-    const current = await continuationStore.require(continuationId);
-    if (current.workspaceId !== workspace.id || path.resolve(current.workspaceRoot) !== path.resolve(workspace.root)) {
-      throw new Error("Continuation does not belong to the selected workspace.");
-    }
-    if (current.mcpSessionId !== sessionId) {
-      const previousSessionActive = current.mcpSessionId ? Boolean(options.isTransportSessionActive?.(current.mcpSessionId)) : false;
-      await reassociateContinuationSession({
-        enabled: continuationFeatureEnabled(configForWorkspace(workspace)),
-        store: continuationStore,
-        workspace,
-        continuationId,
-        newSessionId: sessionId,
-        previousSessionActive
-      });
-    }
-    return { workspace, sessionId };
-  };
   registerVerificationJobProducer();
   const goalStores = new Map<string, GoalStore>();
   const goalStoreFor = (workspace: Workspace): GoalStore => {
@@ -1487,35 +1429,6 @@ export function createCodexProServer(
         operationManager: operationManagerFor(workspace)
       })
     );
-  const refreshContinuationHeartbeatForTool = async (workspace: Workspace, name: string, args: Record<string, any>): Promise<void> => {
-    const effective = configForWorkspace(workspace);
-    const sessionId = authoritativeTransportSessionId();
-    if (!continuationFeatureEnabled(effective) || !sessionId) return;
-    const active = (await continuationStore.list({ workspaceId: workspace.id, sessionId }))
-      .filter((record) => !TERMINAL_CONTINUATION_STATES.has(record.state));
-    if (active.length !== 1) return;
-    const record = active[0];
-    try {
-      const semanticMutation = name.startsWith("continuation_") && name !== "continuation_status" && Number.isInteger(args?.expected_revision);
-      if (semanticMutation) {
-        await continuationStore.touchHeartbeat(record.id, { workspace, sessionId }, { expectedRevision: record.revision });
-      } else {
-        const refreshed = await recordContinuationHeartbeat({
-          enabled: true,
-          store: continuationStore,
-          binding: { workspace, sessionId },
-          continuationId: record.id,
-          expectedRevision: record.revision,
-          maxDispatches: effective.continuationMaxDispatches
-        });
-        if (record.state === "awaiting_ack" && refreshed.state !== "awaiting_ack") {
-          await activity.appendBestEffort({ workspaceId: workspace.id, kind: "continuation", action: "ack", status: "ok", continuationId: record.id.replace(/^continuation_/, "").slice(0, 8), summary: `state=${refreshed.state}` });
-        }
-      }
-    } catch {
-      // Heartbeat is liveness evidence only; a concurrent semantic transition must not fail the underlying tool call.
-    }
-  };
   const server = new McpServer({ name: "CodexPro", version: CODEXPRO_VERSION }, { instructions: serverInstructions(config) });
   const originalServerClose = server.close.bind(server);
   let serverClosing = false;
@@ -1566,12 +1479,9 @@ export function createCodexProServer(
     const processId = structured?.process_id ?? structured?.process?.id ?? args?.process_id;
     const jobId = structured?.job_id ?? structured?.job?.id ?? args?.job_id;
     const goalId = structured?.goal_id ?? structured?.goal?.id ?? args?.goal_id;
-    const continuationId = structured?.task?.id ?? args?.continuation_id;
-    const continuationState = typeof structured?.task?.state === "string" ? structured.task.state : undefined;
     const rawPaths = Array.isArray(structured?.paths) ? structured.paths : typeof structured?.path === "string" ? [structured.path] : [];
     let kind: ActivityKind = "tool";
-    if (name.startsWith("continuation_") || continuationId) kind = "continuation";
-    else if (goalId || name.includes("goal")) kind = "goal";
+    if (goalId || name.includes("goal")) kind = "goal";
     else if (jobId || name.includes("job")) kind = "job";
     else if (processId || name.includes("process")) kind = "process";
     else if (checkId || name.includes("check") || name === "verify_changes") kind = "check";
@@ -1581,10 +1491,6 @@ export function createCodexProServer(
     const verificationStatus = structured?.repair?.status;
     const summary = status === "error"
       ? "tool call failed"
-      : kind === "continuation"
-        ? `state=${continuationState ?? "unknown"} short_id=${String(continuationId ?? "unknown").replace(/^continuation_/, "").slice(0, 8)}`
-      : kind === "check" && structured?.deadlineYielded === true
-        ? "verification incomplete; required checks remain pending"
         : kind === "check" && verificationStatus === "not_run"
           ? "verification not run"
           : kind === "check" && structured?.complete === false
@@ -1594,15 +1500,13 @@ export function createCodexProServer(
               : kind === "check" && structured?.ok === true
                 ? "verification passed"
                 : "tool call completed";
-    const continuationAction = name === "continuation_complete" ? "completed" : name === "continuation_cancel" ? "canceled" : name.replace(/^continuation_/, "");
-    const action = kind === "continuation" ? continuationAction : name;
+    const action = name;
     return { workspaceId: workspace.id, kind, action, status,
       ...(operationId ? { operationId: String(operationId) } : {}),
       ...(checkId ? { checkId: String(checkId) } : {}),
       ...(processId ? { processId: String(processId) } : {}),
       ...(jobId ? { jobId: String(jobId) } : {}),
       ...(goalId ? { goalId: String(goalId) } : {}),
-      ...(continuationId ? { continuationId: String(continuationId).replace(/^continuation_/, "").slice(0, 8) } : {}),
       ...(rawPaths.length ? { relativePaths: rawPaths.map(String) } : {}),
       summary
     };
@@ -1625,7 +1529,6 @@ export function createCodexProServer(
     async before(name, args) {
       if (name === SUPERTOOL_NAME || name === "open_workspace" || name === "project_trust_status") return;
       const workspace = workspaces.getWorkspace(typeof args?.workspace_id === "string" ? args.workspace_id : undefined);
-      await refreshContinuationHeartbeatForTool(workspace, name, args);
       if (!hookSessionStarted.has(workspace.id)) {
         const sessionResults = await runWorkspaceHooks(workspace, "session_start", { tool: name });
         if (!sessionResults.some((item) => item.status === "skipped")) hookSessionStarted.add(workspace.id);
@@ -1758,6 +1661,7 @@ export function createCodexProServer(
       const safeConfig = {
         packageName: CODEXPRO_PACKAGE_NAME,
         version: CODEXPRO_VERSION,
+        build: buildIdentity(),
         defaultRoot: config.defaultRoot,
         allowedRoots: config.allowedRoots,
         host: config.host,
@@ -1783,16 +1687,13 @@ export function createCodexProServer(
         toolMode: config.toolMode,
         toolCards: config.toolCards,
         connectionTest: config.connectionTest,
-        syncCallDeadlineMode: config.syncCallDeadlineMode,
-        syncCallDeadlineMs: config.syncCallDeadlineMs,
-        continuationEnabled: config.continuationEnabled,
-        continuationTelegramEnabled: config.continuationTelegramEnabled,
-        executionRouting: executionThresholds(config.syncCallDeadlineMs),
         allowGitPush: config.allowGitPush,
         codeGraphEnabled: config.codeGraphEnabled,
         codeGraphConfigured: Boolean(config.codeGraphExecutable || resolveCommand("codegraph")),
         lspEnabled: config.lspEnabled,
         lspConfigured: Boolean(config.lspExecutable),
+        artifactExportEnabled: config.artifactExportEnabled,
+        localServiceProbeEnabled: config.localServiceProbeEnabled,
         goalsEnabled: config.goalsEnabled,
         goalPlatform,
         maxGoals: config.maxGoals,
@@ -1949,109 +1850,6 @@ export function createCodexProServer(
     return textResult(`# Resume Job\n\nState: ${record.state}`, { workspace_id: workspace.id, job_id: record.id, job });
   });
 
-  const continuationIdSchema = z.string().regex(/^continuation_[A-Za-z0-9-]{1,80}$/);
-  const continuationSessionSchema = z.string().regex(/^[A-Za-z0-9._:-]{1,160}$/).optional();
-  const continuationIntentSchema = z.object({
-    id: z.string().regex(/^intent_[A-Za-z0-9-]{1,80}$/).optional(),
-    template_key: z.enum(["resume_all_v1", "focus_remaining_v1"]),
-    label: z.string().min(1).max(80),
-    focus_ref: z.string().min(1).max(400).optional()
-  });
-
-  registerCodexTool(config, server, "continuation_arm", {
-    title: "Arm Task Continuation",
-    description: "Arm bounded semantic continuation state for this task. Browser dispatch is not performed by this tool.",
-    inputSchema: { workspace_id: z.string().optional(), session_id: continuationSessionSchema, continuation_id: continuationIdSchema.optional(), title: z.string().min(1).max(160) },
-    annotations: LOCAL_WRITE_ANNOTATIONS
-  }, async (args) => {
-    const workspace = workspaces.getWorkspace(args.workspace_id); const effective = configForWorkspace(workspace);
-    const record = await armContinuation({ enabled: continuationFeatureEnabled(effective), store: continuationStore, binding: continuationBinding(workspace, args.session_id), title: args.title, continuationId: args.continuation_id });
-    const task = publicContinuationRecord(record);
-    return textResult(`# Task Continuation\n\nArmed: ${record.id}`, { continuation_enabled: continuationFeatureEnabled(effective), task });
-  });
-
-  registerCodexTool(config, server, "continuation_checkpoint", {
-    title: "Checkpoint Task Continuation",
-    description: "Replace bounded phase/evidence/remaining-work metadata and semantic continuation intents. Stores no prompt body.",
-    inputSchema: {
-      workspace_id: z.string().optional(), session_id: continuationSessionSchema, continuation_id: continuationIdSchema,
-      expected_revision: z.number().int().min(1), checkpoint_id: z.string().regex(/^[A-Za-z0-9._:-]{1,96}$/),
-      current_phase: z.string().max(240).optional(), completed_evidence: z.array(z.string().min(1).max(400)).max(64),
-      remaining_work: z.array(z.string().min(1).max(400)).max(64), intents: z.array(continuationIntentSchema).max(4).optional()
-    }, annotations: LOCAL_WRITE_ANNOTATIONS
-  }, async (args) => {
-    const workspace = workspaces.getWorkspace(args.workspace_id); const effective = configForWorkspace(workspace);
-    const intents = args.intents?.map((intent: any) => ({ id: intent.id, templateKey: intent.template_key, label: intent.label, focusRef: intent.focus_ref }));
-    const record = await checkpointContinuation({ enabled: continuationFeatureEnabled(effective), store: continuationStore, binding: continuationBinding(workspace, args.session_id), continuationId: args.continuation_id, expectedRevision: args.expected_revision, checkpointId: args.checkpoint_id, currentPhase: args.current_phase, completedEvidence: args.completed_evidence, remainingWork: args.remaining_work, intents });
-    return textResult(`# Task Continuation Checkpoint\n\nRevision: ${record.revision}`, { task: publicContinuationRecord(record) });
-  });
-
-  registerCodexTool(config, server, "continuation_request", {
-    title: "Request Task Continuation",
-    description: "Create a fresh opaque continuation authorization nonce for semantic continuation state; does not submit a ChatGPT message.",
-    inputSchema: { workspace_id: z.string().optional(), session_id: continuationSessionSchema, continuation_id: continuationIdSchema, expected_revision: z.number().int().min(1), request_id: z.string().regex(/^[A-Za-z0-9._:-]{1,96}$/), selected_intent_id: z.string().regex(/^intent_[A-Za-z0-9-]{1,80}$/).optional() },
-    annotations: LOCAL_WRITE_ANNOTATIONS
-  }, async (args) => {
-    const workspace = workspaces.getWorkspace(args.workspace_id); const effective = configForWorkspace(workspace);
-    const record = await requestContinuation({ enabled: continuationFeatureEnabled(effective), store: continuationStore, binding: continuationBinding(workspace, args.session_id), continuationId: args.continuation_id, expectedRevision: args.expected_revision, requestId: args.request_id, selectedIntentId: args.selected_intent_id });
-    return textResult(`# Task Continuation Requested\n\nState: ${record.state}`, { task: publicContinuationRecord(record) });
-  });
-
-  registerCodexTool(config, server, "continuation_status", {
-    title: "Task Continuation Status",
-    description: "Read bounded public continuation state without nonce, workspace path, prompt text, browser credentials, or conversation content.",
-    inputSchema: { workspace_id: z.string().optional(), session_id: continuationSessionSchema, continuation_id: continuationIdSchema },
-    annotations: READ_ONLY_ANNOTATIONS
-  }, async (args) => {
-    const workspace = workspaces.getWorkspace(args.workspace_id); const effective = configForWorkspace(workspace);
-    const binding = await recoverContinuationBinding(workspace, args.continuation_id, args.session_id);
-    const current = await continuationStore.requireForBinding(args.continuation_id, binding);
-    await recordContinuationHeartbeat({
-      enabled: continuationFeatureEnabled(effective), store: continuationStore, binding,
-      continuationId: current.id, expectedRevision: current.revision, maxDispatches: effective.continuationMaxDispatches
-    });
-    const task = await continuationStatus(continuationStore, binding, args.continuation_id);
-    return textResult(`# Task Continuation Status\n\n${JSON.stringify(task, null, 2)}`, { continuation_enabled: continuationFeatureEnabled(effective), task });
-  });
-
-  registerCodexTool(config, server, "continuation_reconcile", {
-    title: "Reconcile Manual Task Turn",
-    description: "Resolve a pending manual turn only as resume, redirect, supersede, or cancel. This tool accepts no raw prompt/transcript field.",
-    inputSchema: {
-      workspace_id: z.string().optional(), session_id: continuationSessionSchema, continuation_id: continuationIdSchema,
-      expected_revision: z.number().int().min(1), disposition: z.enum(["resume", "redirect", "supersede", "cancel"]),
-      replacement_current_phase: z.string().max(240).optional(), replacement_remaining_work: z.array(z.string().min(1).max(400)).max(64).optional(),
-      replacement_intents: z.array(continuationIntentSchema).max(4).optional()
-    }, annotations: LOCAL_WRITE_ANNOTATIONS
-  }, async (args) => {
-    const workspace = workspaces.getWorkspace(args.workspace_id); const effective = configForWorkspace(workspace);
-    const replacementIntents = args.replacement_intents?.map((intent: any) => ({ id: intent.id, templateKey: intent.template_key, label: intent.label, focusRef: intent.focus_ref }));
-    const record = await reconcileContinuationManualTurn({ enabled: continuationFeatureEnabled(effective), store: continuationStore, binding: continuationBinding(workspace, args.session_id), continuationId: args.continuation_id, expectedRevision: args.expected_revision, disposition: args.disposition, replacementCurrentPhase: args.replacement_current_phase, replacementRemainingWork: args.replacement_remaining_work, replacementIntents });
-    return textResult(`# Task Continuation Reconciled\n\nState: ${record.state}`, { task: publicContinuationRecord(record) });
-  });
-
-  registerCodexTool(config, server, "continuation_complete", {
-    title: "Complete Task Continuation",
-    description: "Semantically mark the continuation task complete. Browser state cannot call this implicitly; remaining work must be empty unless verified_complete is explicit.",
-    inputSchema: { workspace_id: z.string().optional(), session_id: continuationSessionSchema, continuation_id: continuationIdSchema, expected_revision: z.number().int().min(1), verified_complete: z.boolean().optional() },
-    annotations: LOCAL_WRITE_ANNOTATIONS
-  }, async (args) => {
-    const workspace = workspaces.getWorkspace(args.workspace_id);
-    const record = await completeContinuation({ store: continuationStore, binding: continuationBinding(workspace, args.session_id), continuationId: args.continuation_id, expectedRevision: args.expected_revision, verifiedComplete: args.verified_complete });
-    return textResult(`# Task Continuation Completed\n\nState: ${record.state}`, { task: publicContinuationRecord(record) });
-  });
-
-  registerCodexTool(config, server, "continuation_cancel", {
-    title: "Cancel Task Continuation",
-    description: "Terminally cancel continuation automation state without stopping process/job/Goal work.",
-    inputSchema: { workspace_id: z.string().optional(), session_id: continuationSessionSchema, continuation_id: continuationIdSchema, expected_revision: z.number().int().min(1) },
-    annotations: LOCAL_WRITE_ANNOTATIONS
-  }, async (args) => {
-    const workspace = workspaces.getWorkspace(args.workspace_id);
-    const record = await cancelContinuation({ store: continuationStore, binding: continuationBinding(workspace, args.session_id), continuationId: args.continuation_id, expectedRevision: args.expected_revision });
-    return textResult(`# Task Continuation Canceled\n\nState: ${record.state}`, { task: publicContinuationRecord(record) });
-  });
-
   registerCodexTool(config, server, "read_many", {
     title: "Read Many", description: "Read multiple guarded text files with isolated per-item failures and one aggregate byte budget.",
     inputSchema: { workspace_id: z.string().optional(), items: z.array(z.object({ path: z.string(), start_line: z.number().int().min(1).optional(), end_line: z.number().int().min(1).optional() })).min(1).max(64), max_total_bytes: z.number().int().min(1).optional() },
@@ -2152,7 +1950,7 @@ export function createCodexProServer(
     async (args) => {
       const workspace = workspaces.getWorkspace(args.workspace_id);
       const workspaceConfig = configForWorkspace(workspace);
-      const executionHint = executionHintPublic(classifyExecutionHint({ deadlineMs: workspaceConfig.syncCallDeadlineMs, category: "shell", highVariance: true }));
+      const executionHint = executionHintPublic(classifyExecutionHint({ category: "shell", highVariance: true }));
       const processRecord = await processManagerFor(workspace).start({
         command: String(args.command ?? ""),
         cwd: args.cwd,
@@ -2382,7 +2180,7 @@ export function createCodexProServer(
       const snapshot = telemetry.snapshot();
       const result = connectionDiagnostics(snapshot, options.activeSessionCount?.() ?? 0);
       const resilience = toolSurfaceDiagnostics(config, registeredToolNames(server), toolNamesForMode(config), snapshot);
-      const combined = { ...result, deadline: resilience.deadline, capabilities: resilience.capabilities, resilience: resilience.resilience };
+      const combined = { ...result, capabilities: resilience.capabilities, resilience: resilience.resilience };
       return textResult(`# Connection Diagnostics\n\n${JSON.stringify(combined, null, 2)}`, combined);
     }
   );
@@ -2402,22 +2200,6 @@ export function createCodexProServer(
       const effective = configForWorkspace(workspace);
       const result = toolSurfaceDiagnostics(effective, registeredToolNames(server), toolNamesForMode(effective), telemetry.snapshot());
       return textResult(`# Tool Surface Diagnostics\n\n${JSON.stringify(result, null, 2)}`, { ...result });
-    }
-  );
-
-  registerCodexTool(
-    config,
-    server,
-    "tool_time_probe",
-    {
-      title: "Tool Time Probe",
-      description: "Harmless observe-mode-only host-window discovery probe. It waits and measures only; it does not read or mutate workspace, Git, process, browser, or network state and never changes saved deadline settings.",
-      inputSchema: { max_minutes: z.number().int().min(1).max(120).optional().describe("Diagnostic wait ceiling in minutes. Use only in a disposable chat while runtime deadline mode is Unlimited/observe.") },
-      annotations: READ_ONLY_ANNOTATIONS
-    },
-    async (args) => {
-      const result = await runToolTimeProbe(config, { maxMinutes: args.max_minutes });
-      return textResult(`# Tool Time Probe\n\nStatus: ${result.status}\nElapsed: ${result.elapsed_ms} ms\n\n${result.guidance}`, result);
     }
   );
 
@@ -2958,6 +2740,102 @@ export function createCodexProServer(
     }
   );
 
+  registerCodexTool(config, server, "integration_plan", {
+    title: "Plan Multi-Plugin Workflow",
+    description: "Discover locally configured MCP server names, recommend a multi-service workflow based on task and verified prior usage. This tool does not invoke other ChatGPT plugins or execute remote actions.",
+    inputSchema: { workspace_id: z.string().optional(), task: z.string().min(1).max(300) },
+    annotations: READ_ONLY_ANNOTATIONS
+  }, async args => {
+    const workspace = workspaces.getWorkspace(args.workspace_id);
+    const result = await integrationPlan(configForWorkspace(workspace), workspace, args.task);
+    return textResult(JSON.stringify(result, null, 2), { workspace_id: workspace.id, ...result });
+  });
+
+  registerCodexTool(config, server, "integration_record", {
+    title: "Remember Multi-Plugin Workflow",
+    description: "Store which discovered MCP integrations were actually used for a task and their verified outcome.",
+    inputSchema: { workspace_id: z.string().optional(), task: z.string().min(1).max(300), integrations: z.array(z.string()).min(1).max(12), outcome: z.enum(["success","partial","failure"]) }
+  }, async args => {
+    const workspace = workspaces.getWorkspace(args.workspace_id);
+    assertWriteToolAllowed(configForWorkspace(workspace), ".codexpro/integration-usage.jsonl");
+    const result = await integrationRecord(configForWorkspace(workspace), workspace, args.task, args.integrations, args.outcome);
+    return textResult(JSON.stringify(result), { workspace_id: workspace.id, ...result });
+  });
+
+  registerCodexTool(config, server, "skill_select", {
+    title: "Select Skill for Task",
+    description: "Before starting a task, rank existing workspace/user/plugin skills and prior successful uses; load the selected skill before executing.",
+    inputSchema: { workspace_id: z.string().optional(), task: z.string().min(1).max(300) },
+    annotations: READ_ONLY_ANNOTATIONS
+  }, async args => {
+    const workspace = workspaces.getWorkspace(args.workspace_id);
+    const result = await selectSkill(workspace, args.task);
+    return textResult(JSON.stringify(result, null, 2), { workspace_id: workspace.id, ...result });
+  });
+
+  registerCodexTool(config, server, "skill_create", {
+    title: "Create Reusable Skill",
+    description: "Create a new local SKILL.md only when no existing skill fits and the user has authorized creating reusable instructions. Does not execute generated instructions.",
+    inputSchema: { workspace_id: z.string().optional(), name: z.string(), description: z.string(), instructions: z.string() }
+  }, async args => {
+    const workspace = workspaces.getWorkspace(args.workspace_id);
+    assertWriteToolAllowed(configForWorkspace(workspace), ".agents/skills");
+    const result = await createSkill(workspace, args.name, args.description, args.instructions);
+    return textResult(JSON.stringify(result), { workspace_id: workspace.id, ...result });
+  });
+
+  registerCodexTool(config, server, "skill_record", {
+    title: "Record Skill Usage",
+    description: "Record a skill used for a task and the verified outcome; informs future skill selection.",
+    inputSchema: { workspace_id: z.string().optional(), task: z.string().min(1).max(300), skill: z.string(), outcome: z.enum(["success","failure","partial"]) }
+  }, async args => {
+    const workspace = workspaces.getWorkspace(args.workspace_id);
+    assertWriteToolAllowed(configForWorkspace(workspace), ".codexpro/skill-usage.jsonl");
+    const result = await recordSkill(workspace, args.task, args.skill, args.outcome);
+    return textResult(JSON.stringify(result), { workspace_id: workspace.id, ...result });
+  });
+
+  registerCodexTool(config, server, "knowledge_status", {
+    title: "Project Knowledge Status",
+    description: "Inspect available curated local project-memory notes without reading secrets.",
+    inputSchema: { workspace_id: z.string().optional() },
+    annotations: READ_ONLY_ANNOTATIONS
+  }, async (args) => {
+    const workspace = workspaces.getWorkspace(args.workspace_id);
+    const result = await knowledgeStatus(workspace.root);
+    return textResult(JSON.stringify(result, null, 2), result);
+  });
+
+  registerCodexTool(config, server, "knowledge_search", {
+    title: "Search Project Knowledge",
+    description: "Search bounded curated project notes. No production databases or credentials are queried.",
+    inputSchema: {
+      workspace_id: z.string().optional(),
+      query: z.string().min(1).max(200),
+      limit: z.number().int().min(1).max(20).optional()
+    },
+    annotations: READ_ONLY_ANNOTATIONS
+  }, async (args) => {
+    const workspace = workspaces.getWorkspace(args.workspace_id);
+    const matches = await knowledgeSearch(workspace.root, args.query, args.limit ?? 10);
+    return textResult(JSON.stringify(matches, null, 2), { workspace_id: workspace.id, matches, count: matches.length });
+  });
+
+  registerCodexTool(config, server, "knowledge_remember", {
+    title: "Remember Project Decision or Task",
+    description: "Append a short curated note to project memory. Rejects obvious secrets. Requires workspace write mode.",
+    inputSchema: {
+      workspace_id: z.string().optional(),
+      kind: z.enum(["task", "decision", "incident"]),
+      text: z.string().min(1).max(1000)
+    }
+  }, async (args) => {
+    const workspace = workspaces.getWorkspace(args.workspace_id);
+    assertWriteToolAllowed(configForWorkspace(workspace), "codexpro-knowledge/TASKS.md");
+    const result = await knowledgeRemember(workspace.root, args.kind, args.text);
+    return textResult(JSON.stringify(result), { workspace_id: workspace.id, ...result });
+  });
+
   registerCodexTool(
     config,
     server,
@@ -3100,6 +2978,37 @@ export function createCodexProServer(
         includeGlobalSkills: parseBool(args.include_global_skills, false)
       });
       const ai = await readAiBridgeContext(configForWorkspace(workspace), guard, workspace);
+      const instructionSources = await instructionsForPath(workspaceConfig, guard, workspace, ".").catch(() => ({ sources: [] as string[] }));
+      const analysis = workspaceConfig.analysisEnabled
+        ? await inspectWorkspace(workspaceConfig, guard, workspace).catch(() => null)
+        : null;
+      const checks = await discoverTrustedChecks(workspaceConfig, guard, workspace).catch(() => []);
+      const providerStatuses = workspaceConfig.analysisEnabled
+        ? await resolveAnalysisProviders(workspaceConfig, workspace).catch(() => [])
+        : [];
+      const jobs = await jobStore.list(workspace.id).catch(() => []);
+      const batches = await batchStore.list(workspace.id).catch(() => []);
+      const goals = workspaceConfig.goalsEnabled ? await goalStoreFor(workspace).list(workspace.id).catch(() => []) : [];
+      const processes = processManagerFor(workspace).list();
+      const activeStates = new Set(["queued", "running", "paused", "waiting", "active", "approved", "awaiting_review", "awaiting_projection"]);
+      const activeWork = {
+        processes: processes.filter((process) => process.state === "running").length,
+        jobs: jobs.filter((job) => activeStates.has(job.state)).length,
+        batches: batches.filter((batch) => activeStates.has(batch.state)).length,
+        goals: goals.filter((goal) => activeStates.has(goal.state)).length,
+        failed: jobs.filter((job) => job.state === "failed").length + batches.filter((batch) => batch.state === "stale").length,
+        interrupted: jobs.filter((job) => job.state === "interrupted").length
+      };
+      const briefing = composeWorkspaceBriefing({
+        workspace: { id: workspace.id, pathLabel: workspace.id },
+        gitStatus: summary.gitStatus,
+        recentCommits: summary.recentCommits,
+        instructions: instructionSources.sources.map((source) => ({ path: source, scope: "." })),
+        project: analysis ? { languages: analysis.languages, projectTypes: analysis.projectTypes, entrypoints: analysis.entrypoints } : undefined,
+        checks: checks.map((check) => ({ id: check.id, label: check.command })),
+        activeWork,
+        capabilities: explainCapabilities({ config: workspaceConfig, registeredTools: toolNamesForMode(workspaceConfig), providerStatuses })
+      });
       const text = `${summary.text}\n\n## AI handoff context\n\n${ai.text}`;
       const aiContextTruncated = ai.text.length > STRUCTURED_STRING_MAX_CHARS;
       const aiContextText = aiContextTruncated
@@ -3120,7 +3029,8 @@ export function createCodexProServer(
         ai_context: { files: ai.files, text: aiContextText, truncated: aiContextTruncated },
         bash_mode: workspaceConfig.bashMode,
         write_mode: workspaceConfig.writeMode,
-        tool_mode: workspaceConfig.toolMode
+        tool_mode: workspaceConfig.toolMode,
+        briefing
       });
     }
   );
@@ -3792,7 +3702,7 @@ export function createCodexProServer(
         tasks: args.tasks.map((task: any) => ({ id: task.id, title: task.title, kind: task.kind, command: task.command, checkId: task.check_id, dependsOn: task.depends_on ?? [] }))
       }, { maxTasks: workspaceConfig.maxGoalTasks, maxWorkers: workspaceConfig.maxGoalWorkers });
       const result = publicGoalRecord(record);
-      const executionHint = executionHintPublic(classifyExecutionHint({ deadlineMs: workspaceConfig.syncCallDeadlineMs, category: "multi_stage", hasDependencyGraph: record.tasks.length > 1 || record.tasks.some((task) => task.dependsOn.length > 0), requiresReviewProjection: true }));
+      const executionHint = executionHintPublic(classifyExecutionHint({ category: "multi_stage", hasDependencyGraph: record.tasks.length > 1 || record.tasks.some((task) => task.dependsOn.length > 0), requiresReviewProjection: true }));
       return textResult(`# Goal Proposed\n\nID: ${record.id}\nFingerprint: ${record.fingerprint}\nTasks: ${record.tasks.length}\n\nApprove this exact fingerprint before execution.`, { ...result, execution_hint: executionHint });
     }
   );
@@ -3929,6 +3839,115 @@ export function createCodexProServer(
       const workspace = workspaces.getWorkspace(args.workspace_id);
       const result = await readDocument(configForWorkspace(workspace), guard, workspace, { path: String(args.path ?? ""), maxOutputBytes: args.max_output_bytes });
       return textResult(`# Document\n\nFormat: ${result.format}\nSections: ${result.sections}\nBytes: ${result.bytes}\n\n${result.text}`, { workspace_id: workspace.id, ...result });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "read_notebook",
+    {
+      title: "Read Notebook",
+      description: "Read bounded structured metadata, cells, and output summaries from a Jupyter notebook without executing it.",
+      inputSchema: {
+        workspace_id: z.string().optional(),
+        path: z.string().describe("Jupyter notebook path relative to the workspace root."),
+        cell_indices: z.array(z.number().int().min(0)).max(100).optional(),
+        start_cell: z.number().int().min(0).optional(),
+        end_cell: z.number().int().min(0).optional(),
+        include_outputs: z.boolean().optional(),
+        max_output_bytes: z.number().int().min(1000).optional()
+      },
+      annotations: READ_ONLY_ANNOTATIONS
+    },
+    async (args) => {
+      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const result = await readNotebook(configForWorkspace(workspace), guard, workspace, {
+        path: String(args.path ?? ""),
+        cellIndices: args.cell_indices,
+        startCell: args.start_cell,
+        endCell: args.end_cell,
+        includeOutputs: args.include_outputs,
+        maxOutputBytes: args.max_output_bytes
+      });
+      return textResult(`# Notebook\n\nPath: ${result.path}\nCells: ${result.cellCount} (code ${result.codeCells}, markdown ${result.markdownCells}, raw ${result.rawCells})\nSelected: ${result.selectedCells.length}\n\n${result.selectedCells.map((cell) => `## Cell ${cell.index} (${cell.cellType})\n${cell.source}`).join("\n\n")}`, { workspace_id: workspace.id, ...result });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "inspect_table",
+    {
+      title: "Inspect Table",
+      description: "Inspect a bounded CSV, TSV, JSONL, or NDJSON dataset for schema, primitive types, quality counts, numeric summaries, and deterministic samples without mutation.",
+      inputSchema: {
+        workspace_id: z.string().optional(),
+        path: z.string().describe("CSV, TSV, JSONL, or NDJSON path relative to the workspace root."),
+        max_rows: z.number().int().min(1).max(100000).optional(),
+        max_output_bytes: z.number().int().min(1000).optional()
+      },
+      annotations: READ_ONLY_ANNOTATIONS
+    },
+    async (args) => {
+      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const result = await inspectTable(configForWorkspace(workspace), guard, workspace, { path: String(args.path ?? ""), maxRows: args.max_rows, maxOutputBytes: args.max_output_bytes });
+      return textResult(`# Table inspection\n\nPath: ${result.path}\nFormat: ${result.format}\nRows scanned: ${result.rowsScanned}${result.totalRows !== undefined ? `\nTotal rows: ${result.totalRows}` : ""}\nMalformed rows: ${result.malformedRows}\n\nColumns: ${result.columns.map((column) => `${column.name} (${column.type})`).join(", ") || "none"}`, { workspace_id: workspace.id, ...result });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "inspect_dependency",
+    {
+      title: "Inspect Dependency",
+      description: "Inspect the exact workspace-local installed Node dependency selected by a direct package declaration, without executing or browsing arbitrary node_modules paths.",
+      inputSchema: {
+        workspace_id: z.string().optional(),
+        package_name: z.string().min(1).max(214),
+        package_path: z.string().optional().describe("Owning workspace package directory or package.json; defaults to the workspace root."),
+        symbol: z.string().max(160).optional(),
+        include_readme: z.boolean().optional(),
+        max_matches: z.number().int().min(1).max(32).optional(),
+        max_output_bytes: z.number().int().min(1000).optional()
+      },
+      annotations: READ_ONLY_ANNOTATIONS
+    },
+    async (args) => {
+      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const result = await inspectDependency(configForWorkspace(workspace), guard, workspace, {
+        packageName: String(args.package_name ?? ""),
+        packagePath: args.package_path,
+        symbol: args.symbol,
+        includeReadme: args.include_readme,
+        maxMatches: args.max_matches,
+        maxOutputBytes: args.max_output_bytes
+      });
+      return textResult(`# Dependency inspection\n\nPackage: ${result.packageName}\nKind: ${result.kind}\nInstalled version: ${result.installedVersion ?? "not resolved"}\nEntry point: ${result.resolvedEntrypoint ?? "unknown"}\nTypes: ${result.typesEntrypoint ?? "unknown"}\nWarnings: ${result.warnings.length || "none"}`, { workspace_id: workspace.id, ...result });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "probe_local_service",
+    {
+      title: "Probe Local Service",
+      description: "Observe one explicitly requested loopback HTTP GET or HEAD response. Full mode and CODEXPRO_LOCAL_SERVICE_PROBE=1 are required; redirects, credentials, proxies, and arbitrary hosts are rejected.",
+      inputSchema: {
+        workspace_id: z.string().optional(),
+        url: z.string().min(1).max(2048),
+        method: z.enum(["GET", "HEAD"]).optional(),
+        timeout_ms: z.number().int().min(250).max(10000).optional(),
+        max_body_bytes: z.number().int().min(1000).max(256000).optional()
+      },
+      annotations: READ_ONLY_ANNOTATIONS
+    },
+    async (args) => {
+      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const result = await probeLocalService({ url: String(args.url ?? ""), method: args.method, timeoutMs: args.timeout_ms, maxBodyBytes: args.max_body_bytes });
+      return textResult(`# Local service probe\n\n${result.method} ${result.url}\nStatus: ${result.status} ${result.statusText}\nElapsed: ${result.elapsedMs} ms\nOwnership: ${result.workspaceOwnership}\n\n${result.body?.preview ?? "No text body returned."}`, { workspace_id: workspace.id, ...result });
     }
   );
 

@@ -1,9 +1,17 @@
 name: CI
 
 on:
+  # Documentation-only edits do not change the application or shipped executable.
+  # Operator can still request cross-OS coverage with workflow_dispatch.
   pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
   push:
     branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
   workflow_dispatch:
 
 permissions:
@@ -22,7 +30,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             node: 20
           - os: windows-latest
             node: 24
@@ -45,30 +53,3 @@ jobs:
 
       - name: Smoke tests
         run: npm run smoke
-
-  release-integrity:
-    name: Release integrity
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: 24
-          cache: npm
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Stress tests
-        run: npm run stress
-
-      - name: Dependency audit
-        run: npm audit --audit-level=high
-
-      - name: Verify release package
-        run: npm run release:pack

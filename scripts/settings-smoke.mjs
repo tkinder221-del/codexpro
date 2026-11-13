@@ -11,7 +11,6 @@ import {
   readCloudflaredAssetResponse,
   verifyCloudflaredAsset
 } from './cloudflared-release.mjs';
-import { ContinuationStore } from '../dist/continuation/store.js';
 
 const pinnedCloudflared = cloudflaredReleaseAsset('darwin', 'arm64');
 if (
@@ -291,8 +290,6 @@ const saved = run([
   'https://widgets.codexpro.test',
   '--tool-cards',
   'on',
-  '--sync-call-deadline-minutes',
-  '12',
   '--analysis',
   'on',
   '--artifact-export',
@@ -317,7 +314,7 @@ if (!saved.includes('Saved workspace settings')) {
 }
 
 const shown = run(['settings', 'show', '--root', root], env);
-for (const expected of ['Tunnel', 'ngrok', 'codexpro-test.ngrok-free.app', '19087', 'Tool cards', 'on', 'Analysis', 'on', 'Artifact export', 'on', 'Durable Goals', 'on', 'CodeGraph', 'on', 'LSP', 'off', 'Git push', 'off', 'Environment inheritance', 'off', 'Bash transcript', 'full', 'Sync call deadline', '12 min', 'Task continuation', 'off', 'Continuation browser', 'chrome', 'Continuation profile', 'default', 'Continuation cooldown', '60000 ms', 'Continuation max dispatches', '20', 'Unexpected interruption grace', '120000 ms', 'Continuation notifications', 'on', 'Telegram continuation', 'off', 'Projects', realReuseRoot, '<saved>']) {
+for (const expected of ['Tunnel', 'ngrok', 'codexpro-test.ngrok-free.app', '19087', 'Tool cards', 'on', 'Analysis', 'on', 'Artifact export', 'on', 'Durable Goals', 'on', 'CodeGraph', 'on', 'LSP', 'off', 'Git push', 'off', 'Environment inheritance', 'off', 'Bash transcript', 'full', 'Projects', realReuseRoot, '<saved>']) {
   if (!shown.includes(expected)) {
     throw new Error(`settings show missing ${expected}\n${shown}`);
   }
@@ -338,71 +335,9 @@ if (
   || profile.lspEnabled !== false
   || profile.allowGitPush !== false
   || profile.inheritEnv !== false
-  || profile.syncCallDeadlineMode !== 'bounded'
-  || profile.syncCallDeadlineMs !== 720_000
-  || profile.continuationEnabled !== false
-  || profile.continuationBrowser !== 'chrome'
-  || profile.continuationProfile !== 'default'
-  || profile.continuationCooldownMs !== 60_000
-  || profile.continuationMaxDispatches !== 20
-  || profile.continuationUnexpectedGraceMs !== 120_000
-  || profile.continuationNotificationsEnabled !== true
-  || profile.continuationTelegramEnabled !== false
   || JSON.stringify(profile.allowedRoots) !== JSON.stringify([realReuseRoot])
 ) {
   throw new Error(`settings profile did not persist tool/widget options: ${JSON.stringify(profile)}`);
-}
-run(['settings', 'set', '--root', root, '--continuation', 'enabled', '--continuation-browser', 'edge', '--continuation-profile', 'plan34-test', '--continuation-cooldown-ms', '90000', '--continuation-max-dispatches', '7', '--continuation-unexpected-grace-ms', '180000', '--continuation-notifications', 'off', '--continuation-telegram', 'on'], env);
-const continuationProfile = await readProfile(root, home);
-if (continuationProfile.continuationEnabled !== true || continuationProfile.continuationBrowser !== 'edge' || continuationProfile.continuationProfile !== 'plan34-test' || continuationProfile.continuationCooldownMs !== 90_000 || continuationProfile.continuationMaxDispatches !== 7 || continuationProfile.continuationUnexpectedGraceMs !== 180_000 || continuationProfile.continuationNotificationsEnabled !== false || continuationProfile.continuationTelegramEnabled !== true) {
-  throw new Error(`continuation settings did not persist: ${JSON.stringify(continuationProfile)}`);
-}
-const disabledContinuationStatus = run(['continuation', 'status', '--root', runtimeRoot], env);
-for (const expected of ['Task continuation', 'disabled', 'Transport', 'unavailable', 'Browser setup', 'not required']) {
-  if (!disabledContinuationStatus.toLowerCase().includes(expected.toLowerCase())) throw new Error(`disabled continuation status missing ${expected}:\n${disabledContinuationStatus}`);
-}
-runFail(['continuation', 'browser', 'pair', '--root', runtimeRoot], env, /continuation_disabled/i);
-const disabledBrowserStatus = run(['continuation', 'browser', 'status', '--root', runtimeRoot], env);
-for (const expected of ['continuation', 'disabled', 'not required']) {
-  if (!disabledBrowserStatus.toLowerCase().includes(expected)) throw new Error(`disabled browser status missing ${expected}:\n${disabledBrowserStatus}`);
-}
-const enabledContinuationStatus = run(['continuation', 'status', '--root', root], env);
-for (const expected of ['Saved next run', 'enabled', 'Transport', 'unavailable', 'Current runtime']) {
-  if (!enabledContinuationStatus.toLowerCase().includes(expected.toLowerCase())) throw new Error(`enabled continuation status missing ${expected}:\n${enabledContinuationStatus}`);
-}
-const liveRuntimePath = await runtimeStatusPath(root, home);
-await fs.mkdir(path.dirname(liveRuntimePath), { recursive: true });
-await fs.writeFile(liveRuntimePath, JSON.stringify({ version: 1, root: realRoot, pid: process.pid, runtimePid: process.pid, syncCallDeadlineMode: 'bounded', syncCallDeadlineMs: 300_000, continuationEnabled: false, localStatusUrl: 'http://127.0.0.1/setup?codexpro_token=SHOULD_NOT_LEAK' }), 'utf8');
-const liveContinuationStatus = run(['continuation', 'status', '--root', root], env);
-for (const expected of ['Current runtime', '5 min', 'Transport', 'ready', 'Current continuation', 'disabled', 'Saved next run continuation', 'enabled', 'Saved next run deadline', '12 min']) {
-  if (!liveContinuationStatus.toLowerCase().includes(expected.toLowerCase())) throw new Error(`live continuation status missing ${expected}:\n${liveContinuationStatus}`);
-}
-if (liveContinuationStatus.includes('SHOULD_NOT_LEAK')) throw new Error(`continuation status leaked runtime URL credential:\n${liveContinuationStatus}`);
-await fs.rm(liveRuntimePath, { force: true });
-const continuationHelp = run(['continuation', '--help'], env);
-for (const expected of ['continuation status', 'arm-status', 'disarm', 'browser', 'clear-profile']) {
-  if (!continuationHelp.toLowerCase().includes(expected.toLowerCase())) throw new Error(`continuation help missing ${expected}:\n${continuationHelp}`);
-}
-if (/--token(?:\s|<|=)|cookie|conversation url/i.test(continuationHelp)) throw new Error(`continuation help exposes secret-bearing concepts or token-valued arguments:\n${continuationHelp}`);
-const cliContinuationStore = new ContinuationStore(path.join(home, 'continuation'), 16);
-const cliTask = await cliContinuationStore.create({ workspace: { id: 'ws_plan34_cli', root: realRoot }, title: 'Plan 34 CLI disarm test' });
-const disarmOutput = run(['continuation', 'disarm', '--root', root, '--task', cliTask.id], env);
-if (!/canceled/i.test(disarmOutput)) throw new Error(`continuation disarm did not report cancellation:\n${disarmOutput}`);
-const disarmedTask = await cliContinuationStore.require(cliTask.id);
-if (disarmedTask.state !== 'canceled' || disarmedTask.revision !== cliTask.revision + 1) throw new Error(`continuation disarm did not terminally cancel only continuation state: ${JSON.stringify(disarmedTask)}`);
-for (const [args, pattern] of [
-  [['--continuation-browser', 'firefox'], /continuation browser/i],
-  [['--continuation-profile', '../unsafe'], /continuation profile/i],
-  [['--continuation-cooldown-ms', '9999'], /continuation cooldown/i],
-  [['--continuation-max-dispatches', '101'], /continuation max dispatches/i],
-  [['--continuation-unexpected-grace-ms', '29999'], /unexpected.*grace/i]
-]) {
-  runFail(['settings', 'set', '--root', root, ...args], env, pattern);
-}
-run(['settings', 'set', '--root', root, '--sync-call-deadline-minutes', 'unlimited'], env);
-const observeProfile = await readProfile(root, home);
-if (observeProfile.syncCallDeadlineMode !== 'observe' || observeProfile.syncCallDeadlineMs !== 720_000) {
-  throw new Error(`settings unlimited did not preserve the finite reference: ${JSON.stringify(observeProfile)}`);
 }
 run([
   'settings',
@@ -586,10 +521,7 @@ runFail([
   '--port',
   'abc'
 ], env, /Invalid port: abc/i);
-
-for (const value of ['4', '61', '12.5', 'banana']) {
-  runFail(['settings', 'set', '--root', policyRoot, '--tunnel', 'none', '--sync-call-deadline-minutes', value], env, /sync-call-deadline-minutes/i);
-}
+runFail(['settings', 'show', '--root', root, '--sync-call-deadline-minutes', '12'], env, /removed/i);
 
 const runtimePort = await getFreePort();
 const runtimePath = await runtimeStatusPath(runtimeRoot, home);
@@ -603,18 +535,16 @@ run([
   '--port',
   String(runtimePort),
   '--tool-cards',
-  'on',
-  '--sync-call-deadline-minutes',
-  '12'
+  'on'
 ], env);
 let firstRuntimeGeneration;
 await withStartedCodexPro([
   '--root',
   runtimeRoot
 ], env, async (child) => {
-  const runtime = await waitForJson(runtimePath, (data) => data.toolCards === true && data.syncCallDeadlineMode === 'bounded' && data.syncCallDeadlineMs === 720_000 && data.transportState === 'ready' && typeof data.runtimeGenerationId === 'string' && data.runtimeGenerationId.length >= 32 && data.pid === child.pid, 'tool-cards runtime status');
-  if (runtime.toolCards !== true || runtime.syncCallDeadlineMode !== 'bounded' || runtime.syncCallDeadlineMs !== 720_000 || runtime.transportState !== 'ready' || !/^[a-f0-9]{32,64}$/.test(runtime.runtimeGenerationId) || runtime.pid !== child.pid) {
-    throw new Error(`runtime status did not persist current generation/deadline/transport truth: ${JSON.stringify(runtime)}`);
+  const runtime = await waitForJson(runtimePath, (data) => data.toolCards === true && data.transportState === 'ready' && typeof data.runtimeGenerationId === 'string' && data.runtimeGenerationId.length >= 32 && data.pid === child.pid, 'tool-cards runtime status');
+  if (runtime.toolCards !== true || runtime.transportState !== 'ready' || !/^[a-f0-9]{32,64}$/.test(runtime.runtimeGenerationId) || runtime.pid !== child.pid) {
+    throw new Error(`runtime status did not persist current generation/transport truth: ${JSON.stringify(runtime)}`);
   }
   firstRuntimeGeneration = runtime.runtimeGenerationId;
 }, { forceKill: true });
@@ -643,9 +573,6 @@ await withStartedCodexPro([
   const restartedRuntime = await waitForJson(runtimePath, (data) => data.pid === child.pid && data.transportState === 'ready' && typeof data.runtimeGenerationId === 'string', 'restarted runtime generation');
   if (restartedRuntime.runtimeGenerationId === firstRuntimeGeneration) {
     throw new Error(`runtime restart reused generation id: ${restartedRuntime.runtimeGenerationId}`);
-  }
-  if (restartedRuntime.syncCallDeadlineMs !== 720_000) {
-    throw new Error(`runtime restart lost current configured deadline: ${JSON.stringify(restartedRuntime)}`);
   }
 }, { forceKill: true });
 
@@ -979,14 +906,10 @@ if (!reused.includes('Saved workspace settings from')) {
 }
 
 const reusedShown = run(['settings', 'show', '--root', reuseRoot], env);
-for (const expected of ['ngrok', 'codexpro-test.ngrok-free.app', '<saved>', 'Task continuation', 'on', 'Continuation browser', 'edge', 'Continuation profile', 'plan34-test']) {
+for (const expected of ['ngrok', 'codexpro-test.ngrok-free.app', '<saved>']) {
   if (!reusedShown.includes(expected)) {
     throw new Error(`reused settings show missing ${expected}\n${reusedShown}`);
   }
-}
-const reusedProfile = await readProfile(reuseRoot, home);
-for (const forbidden of ['browserClientCredential', 'browserClientToken', 'conversationFingerprint', 'pairedClient', 'browserSession', 'cookie']) {
-  if (Object.prototype.hasOwnProperty.call(reusedProfile, forbidden)) throw new Error(`settings use copied forbidden browser/session state field: ${forbidden}`);
 }
 
 const deleted = run(['settings', 'delete', '--root', root, '--yes'], env);

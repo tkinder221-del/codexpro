@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { withWindowsExclusiveLock } from './windows-exclusive-lock.mjs';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { loadConfig } from '../dist/config.js';
@@ -19,6 +20,7 @@ import {
   STRUCTURED_JOB_ATTESTATION_GRACE_MS
 } from '../dist/jobs/runner.js';
 
+console.log('[jobs smoke] initializing fixture');
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-jobs-smoke-'));
 const stateDir = path.join(root, 'state');
 const workspace = { id: 'ws_jobs_smoke', root, openedAt: new Date().toISOString() };
@@ -47,6 +49,7 @@ await runStructuredJobWorker(async (ctx) => {
 });
 `, 'utf8');
 const unregister = registerStructuredJobProducer({ kind: 'verification', workerEntrypoint: fixtureWorker, resumable: true });
+console.log('[jobs smoke] fixture initialized');
 
 async function settle(id, attempts = Math.ceil(STRUCTURED_JOB_ATTESTATION_GRACE_MS / 100) + 20) {
   for (let i = 0; i < attempts; i += 1) {
@@ -55,25 +58,6 @@ async function settle(id, attempts = Math.ceil(STRUCTURED_JOB_ATTESTATION_GRACE_
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   return store.require(id);
-}
-
-async function holdExclusive(filePath, milliseconds) {
-  const escaped = filePath.replaceAll("'", "''");
-  const script = `$f=[System.IO.File]::Open('${escaped}',[System.IO.FileMode]::Open,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None); [Console]::Out.WriteLine('LOCKED'); Start-Sleep -Milliseconds ${milliseconds}; $f.Dispose()`;
-  const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
-  await new Promise((resolve, reject) => {
-    let out = '', err = '';
-    const timeoutMs = 20_000;
-    const timer = setTimeout(() => {
-      child.kill();
-      reject(new Error(`lock process readiness timeout after ${timeoutMs} ms: ${err}`));
-    }, timeoutMs);
-    child.once('error', (error) => { clearTimeout(timer); reject(error); });
-    child.stdout.on('data', (chunk) => { out += String(chunk); if (out.includes('LOCKED')) { clearTimeout(timer); resolve(); } });
-    child.stderr.on('data', (chunk) => { err += String(chunk); });
-    child.on('exit', (code) => { if (!out.includes('LOCKED')) { clearTimeout(timer); reject(new Error(`lock process exited ${code}: ${err}`)); } });
-  });
-  return child;
 }
 
 async function boundedStep(label, operation, timeoutMs = 15_000) {
@@ -99,13 +83,14 @@ async function boundedStep(label, operation, timeoutMs = 15_000) {
   if (process.platform === 'win32') {
     const target = path.join(stateDir, 'records', `${job.id}.json`);
     const current = await store.require(job.id);
-    const locker = await holdExclusive(target, 350);
-    const retryStarted = Date.now();
-    current.progress.phase = 'atomic-retry-probe';
-    current.updatedAt = new Date().toISOString();
-    await store.save(current);
-    assert(Date.now() - retryStarted >= 200, 'job atomic replacement did not exercise the Windows retry path');
-    if (locker.exitCode === null) await new Promise((resolve) => locker.once('exit', resolve));
+    // Cover a legitimate Windows exclusive lock that outlasts the old ~1s retry window.
+    console.log('[jobs smoke] Windows exclusive-lock retry probe');
+    const { elapsedMs } = await withWindowsExclusiveLock(target, 1_850, async () => {
+      current.progress.phase = 'atomic-retry-probe';
+      current.updatedAt = new Date().toISOString();
+      await store.save(current);
+    });
+    assert(elapsedMs >= 1_350, 'job atomic replacement did not outlive the old Windows retry window');
     assert.equal((await store.require(job.id)).progress.phase, 'atomic-retry-probe');
   }
 
@@ -251,9 +236,27 @@ async function boundedStep(label, operation, timeoutMs = 15_000) {
   const canceled = await boundedStep('cancel running job', () => cancelJob(store, cancelTarget.id), 60_000);
   assert.equal(canceled.state, 'canceled');
   assert.equal(await store.readOwner(cancelTarget.id), null);
+  // POSIX signals are asynchronous. Allow the OS and detached-child reaper a bounded
+  // interval to observe the exit instead of asserting immediately after SIGTERM.
   let canceledAlive = true;
-  try { process.kill(cancelLaunched.worker.pid, 0); } catch { canceledAlive = false; }
-  assert.equal(canceledAlive, false, 'canceled job worker still alive');
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    try { process.kill(cancelLaunched.worker.pid, 0); }
+    catch { canceledAlive = false; break; }
+    if (process.platform === 'linux') {
+      try {
+        // A detached worker can briefly remain a zombie; kill(pid, 0) still
+        // succeeds even though the worker has terminated and cannot execute.
+        const stat = await fs.readFile(`/proc/${cancelLaunched.worker.pid}/stat`, 'utf8');
+        const state = stat.slice(stat.lastIndexOf(')') + 2, stat.lastIndexOf(')') + 3);
+        if (state === 'Z' || state === 'X') { canceledAlive = false; break; }
+      } catch (error) {
+        if (error?.code === 'ENOENT') { canceledAlive = false; break; }
+        throw error;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.equal(canceledAlive, false, 'canceled job worker still alive after bounded termination wait');
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: ['dist/stdio.js', '--root', root, '--allow-root', root, '--bash', 'safe', '--write', 'workspace', '--tool-mode', 'standard'],

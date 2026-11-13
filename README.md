@@ -9,21 +9,21 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/PracticalSwan/codexpro/actions"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/PracticalSwan/codexpro/ci.yml?branch=main&style=flat-square"></a>
-  <a href="https://github.com/PracticalSwan/codexpro/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/github/license/PracticalSwan/codexpro?style=flat-square"></a>
-  <img alt="Stable release 0.32.4" src="https://img.shields.io/badge/stable-0.32.4-2563eb?style=flat-square">
-  <img alt="Main post-0.32.4 / Unreleased" src="https://img.shields.io/badge/main-Unreleased-0f766e?style=flat-square">
+  <a href="https://github.com/tkinder221-del/codexpro/actions"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/PracticalSwan/codexpro/ci.yml?branch=main&style=flat-square"></a>
+  <a href="https://github.com/tkinder221-del/codexpro/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/github/license/PracticalSwan/codexpro?style=flat-square"></a>
+  <img alt="Planned release 0.34.1" src="https://img.shields.io/badge/planned-0.34.1-2563eb?style=flat-square">
+  <img alt="Main 0.34.1" src="https://img.shields.io/badge/main-0.34.1-0f766e?style=flat-square">
 </p>
 
 ## Project status
 
-**CodexPro Full** is the `PracticalSwan/codexpro` fork. It keeps the upstream `codexpro` CLI, MCP protocol, profile format, and workspace model for compatibility, while maintaining a separate feature line with the 0.31-0.32 safety, continuity, code-intelligence, artifact, Git, and Durable Goal work.
+**CodexPro Full** is the `PracticalSwan/codexpro` fork. It keeps the upstream `codexpro` CLI, MCP protocol, profile format, and workspace model for compatibility, while maintaining a separate feature line with the 0.31-0.33 safety, continuity, code-intelligence, artifact, Git, and Durable Goal work.
 
 ```text
-Canonical fork: https://github.com/PracticalSwan/codexpro
+Distribution fork: https://github.com/tkinder221-del/codexpro
 Upstream:       https://github.com/rebel0789/codexpro
-Stable release: 0.32.4
-Current main:   post-0.32.4 (verified Unreleased maintenance)
+Next release:   0.34.1
+Current main:   0.34.1 (pending publication)
 ```
 
 CodexPro Full uses the independent distribution package **`codexpro-full`** while preserving the installed CLI command **`codexpro`**, MCP protocol, profiles, and workspace model. **GitHub Releases are the canonical public release channel.** The upstream npm package `codexpro` is a different distribution; the `codexpro-full` npm registry package is not published yet.
@@ -45,11 +45,32 @@ Depending on the active profile, ChatGPT can:
 - use built-in analysis plus optional CodeGraph/LSP providers
 - browse local Codex session history in bounded read-only mode
 - inspect safe ZIP/PDF/OOXML content and export workspace artifacts back to ChatGPT
+- inspect bounded Jupyter notebooks, CSV/TSV/JSONL tables, and directly declared installed Node dependencies without executing them
+- assemble an AI-ready workspace briefing and deterministic verification failure context from existing local evidence
+- optionally observe one explicitly requested loopback HTTP endpoint with a default-off Full-mode GET/HEAD probe
 - execute opt-in Durable Goals in detached Git worktrees with review/projection authorization
 - use planning-only handoff workflows when direct source editing is not desired
 - in 0.32.4 and later, supervise the OpenAI tunnel after startup and recover a failed/not-ready tunnel-client child without restarting the local MCP runtime
 
 See **[FEATURES.md](FEATURES.md)** for the complete feature map and short usage examples.
+
+**0.34.0 release:** Retires the obsolete configurable synchronous-call deadline and observe/probe tooling. CI skips documentation-only edits and avoids duplicate Goal tests in stress; established security, process, job, batch and full-release checks remain.
+
+**0.33.9 operator UI maintenance (included in 0.34.0):** The authenticated local /setup page now prioritizes runtime status and next-start settings, shows only relevant tunnel-provider fields, collapses advanced options, and provides Save/Discard, unsaved-change protection, and clear status feedback. OpenAI connections use Tunnel ID instructions. Existing authorization, redaction and manual-start semantics are unchanged. Compatible dependency updates cover MCP, Express, Zod and Node 24 types, with TypeScript retained at 5.x.
+
+**0.33.8 maintenance:** Ownership-verified external stops now remove the exact validated OpenAI tunnel health scratch directory after the launcher/server tree exits, including Windows force-termination paths that can bypass launcher exit hooks. Tunnel recovery refreshes the recorded scratch path, transient Windows deletion locks are retried, and non-owned or corrupted paths are rejected.
+
+**0.33.7 maintenance:** OpenAI tunnel leases now reject stale PID reuse correctly; Windows local handoffs settle after the direct child exits even when descendants retain output handles; handoff execution logs remain runner-owned; the release gate clean-installs the packed artifact; and the in-range dependency refresh clears the current high-severity audit finding.
+
+**0.33.6 maintenance:** Guarded shutdown now waits boundedly for the identity-verified MCP server child after its launcher exits. A reproduced Windows shutdown race is covered by a delayed-child regression, without weakening PID ownership checks.
+
+**0.33.5 maintenance:** Git-aware workspace inspection excludes ignored build/dependency outputs while retaining tracked and legitimate untracked sources. CLI help links to this fork's version-matched GitHub Release rather than the unrelated upstream npm package. Windows stress fixtures are cleaned up on success or failure; CI pins Ubuntu 24.04.
+
+**0.33.4 maintenance:** Structured Job and Durable Goal state now tolerate longer temporary Windows file locks with bounded atomic-replacement retries. Longer-lock regression coverage protects hosted Windows CI without changing process ownership or removing failure-path safeguards.
+
+**0.33.3 maintenance:** `codexpro doctor` now distinguishes an identity-verified running runtime for the same workspace from an unrelated port conflict. It warns against launching a second instance while preserving genuine port-conflict blockers. The doctor regression also cleans up its temporary fixtures.
+
+**0.33.2 maintenance:** Artifact Export diagnostics now correctly identify the existing `export_file` tool. The Local Service Probe remains off by default for new users; an individual OS user can opt in for all future workspace profiles with `codexpro settings user-default --local-service-probe on`. Use `codexpro settings set --local-service-probe on` to enable an existing workspace, or `--local-service-probe off` to opt a workspace out. The probe still requires Full mode and only allows explicit loopback HTTP GET/HEAD requests. No user preferences or workspace profiles are shipped in the package.
 
 CodexPro Full is not a hosted SaaS service, model proxy, quota bypass, account pool, OS sandbox, or unrestricted remote shell.
 
@@ -58,29 +79,29 @@ CodexPro Full is not a hosted SaaS service, model proxy, quota bypass, account p
 ### From the GitHub Release
 
 ```bash
-npm install -g https://github.com/PracticalSwan/codexpro/releases/download/v0.32.4/codexpro-full-0.32.4.tgz
+npm install -g https://github.com/tkinder221-del/codexpro/releases/download/v0.34.1/codexpro-full-0.34.1.tgz
 codexpro --version
 ```
 
-This installs the latest tagged/stable artifact. **0.32.4 includes the long-lived OpenAI tunnel recovery, Windows continuity hardening, 128-session capacity, tunnel lease protection, deadline-resilience work, and the other fixes listed in the 0.32.4 changelog.** Build current `main` only when you intentionally need later items listed under **Unreleased**.
+After publication, this installs the GitHub Release **0.34.1** artifact. It includes the 0.33.9 operator usability updates and retires obsolete configurable per-tool-call deadlines. Existing bounded command/network safeguards, processes, verification jobs, resumable batches, and Goals remain. Hosted Windows/Node 24, Ubuntu/Node 20, and tag-triggered release checks passed. Start the runtime manually.
 
 ### From a source checkout
 
 ```bash
-git clone https://github.com/PracticalSwan/codexpro.git
+git clone https://github.com/tkinder221-del/codexpro.git
 cd codexpro
 git checkout main
 npm install
 npm run build
 npm pack
-npm install -g ./codexpro-full-0.32.4.tgz
+npm install -g ./codexpro-full-0.34.1.tgz
 codexpro --version
 ```
 
-Expected package version for this release line:
+Expected package version for the release source checkout:
 
 ```text
-0.32.4
+0.34.0
 ```
 
 `main` may move ahead of the latest tag after release; use the Git commit and **Unreleased** changelog entries to distinguish later unreleased builds.
@@ -119,7 +140,7 @@ For a workspace opened with `open_workspace`, keep its returned `workspace_id`. 
 
 ## Recommended practical Full Access profile
 
-For trusted local repositories, the validated 0.32.4 profile is:
+For trusted local repositories, the validated 0.33.0 profile is:
 
 ```text
 Mode: agent
@@ -148,17 +169,7 @@ codexpro settings set --analysis on --artifact-export on --goals on --codegraph 
 
 `codexpro settings show` reports the effective capability state, and later unrelated `settings set` changes preserve these flags.
 
-Tool-time awareness is enabled independently of browser continuation. The normal synchronous transport boundary is 20 minutes; save any integer bounded value from 5-60 minutes with `codexpro settings set --sync-call-deadline-minutes 12` or type it into the local admin **Synchronous tool-call deadline (minutes)** field. This value applies independently to each blocking MCP tool call and restarts on every invocation; it is not a countdown for the whole ChatGPT response/tool-access window. Unlimited/observe is a separate temporary discovery mode rather than a duration choice. Unlimited disables CodexPro's cooperative cutoff but does not extend ChatGPT tool access, lower quality requirements, or make long mutating calls advisable. Saved changes apply on the next launch.
-
-For host-window discovery, use a disposable new ChatGPT chat, temporarily save Unlimited/observe for the next manually started runtime, invoke only the read-only `tool_time_probe`, and note the ChatGPT UI closure time. If no server-side abort is observable, record that UI time manually rather than treating a completed server wait as the host cutoff. Restore a bounded deadline with a multi-minute safety margin afterward; for an observed cutoff near 25 minutes, 20-22 minutes is materially safer than 24 minutes. `connection_diagnostics` and `tool_surface_diagnostics` report current deadline/capability state; authenticated `/admin/diagnostics` also separates current effective from saved-next-run deadline and reports active structured jobs/recent yields.
-
-### Experimental task continuation
-
-Browser and Telegram continuation are installed but remain **default-off and incomplete pending fresh-session acceptance**. When continuation is disabled, the `continuation_*` MCP tools are not advertised; `server_config` still reports the disabled state. Enable these features only for intentional testing.
-
-Detailed browser/Telegram behavior, setup, privacy boundaries, and acceptance procedures live in [FEATURES.md](FEATURES.md), [FAQ.md](FAQ.md), `scripts/continuation-live-checklist.md`, and `scripts/continuation-fresh-session-checklist.md`.
-
-Routing is advisory and derives from the finite deadline reference `D`: `sync_preferred = min(5 minutes, 25% of D)` and `async_preferred = 75% of D`. Never reduce task scope, review depth, verification, or safety to fit one call. Route long model training/rendering or other shell work through `proc_*`, long trusted verification through `job_*`, and substantial dependency/review/projection engineering through `goal_*`.
+CodexPro no longer imposes a configurable per-MCP-call deadline. Each command and local-network probe retains its independent safety timeout, and ChatGPT controls its own tool-access window. For long or unpredictable work use existing `start_workspace_process`, `start_checks`/`start_verification`, resumable batches, or Durable Goals as appropriate; their status and cancellation remain inspectable. Retired deadline CLI flags and environment variables are rejected; old profile fields are ignored and omitted when profiles are saved. Existing profiles and running instances are never rewritten just by installation.
 
 Use a narrower profile for untrusted repositories.
 
@@ -427,6 +438,21 @@ Diagnostics are designed to expose bounded health/configuration metadata without
 
 `activity_log` provides a bounded, sanitized per-workspace chronological ledger outside the workspace; it never stores prompts or raw tool output. The authenticated local control page can save non-secret next-run profile settings. Authentication tokens remain hidden.
 
+## Runtime and structured evidence helpers
+
+The local CLI exposes read-only runtime/build evidence without adding restart authority:
+
+```bash
+codexpro --version --verbose
+codexpro status --json
+codexpro profiles list --json
+codexpro profiles show --current --json
+```
+
+`codexpro stop` is an exact-owner, PID/start-identity guarded local operation; it never starts or restarts CodexPro. The MCP surface adds `read_notebook`, `inspect_table`, and `inspect_dependency` in Standard/Full modes, plus `workspace_snapshot.briefing` and `verify_changes.failure_context`. The dependency reader is the only narrow `node_modules` exception and requires a directly declared, workspace-contained package; generic file/search/context tools remain blocked there.
+
+`probe_local_service` is Full-mode only and disabled by default. When explicitly enabled, it performs one bounded HTTP GET or HEAD request to an explicit loopback port, never follows redirects, sends no credentials or custom headers, and reports target ownership as unknown. A GET can still have application-defined side effects, so enable this capability only for trusted local development services.
+
 ## Safety defaults
 
 - public/non-loopback HTTP requires authentication unless explicitly overridden
@@ -453,6 +479,8 @@ npm run release:pack
 git diff --check
 ```
 
+The roadmap-specific regression layer is also included in `npm run smoke`: `build-identity-smoke.mjs`, `runtime-lifecycle-smoke.mjs`, `capability-explain-smoke.mjs`, `context-provider-smoke.mjs`, `notebook-smoke.mjs`, `workspace-briefing-smoke.mjs`, `verification-failure-context-smoke.mjs`, `table-inspection-smoke.mjs`, `dependency-reality-smoke.mjs`, and `local-service-probe-smoke.mjs` use temporary fixtures and fail closed on the relevant security boundaries.
+
 Run stress only when concurrency/process/output-limit/release-risk changes justify it.
 
 ## Repository and upstream lineage
@@ -460,7 +488,7 @@ Run stress only when concurrency/process/output-limit/release-risk changes justi
 Primary fork:
 
 ```text
-https://github.com/PracticalSwan/codexpro
+https://github.com/tkinder221-del/codexpro
 ```
 
 Upstream project:
