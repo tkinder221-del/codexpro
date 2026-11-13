@@ -517,3 +517,7 @@ This fork preserves upstream attribution and MIT licensing while maintaining its
 ## GitHub Actions: Tailscale connectivity
 
 The manual [Tailscale connectivity workflow](.github/workflows/tailscale-connect.yml) uses the official `tailscale/github-action@v4` to join the tailnet with an ephemeral CI node tagged `tag:ci`. Configure repository Actions secrets `TS_OAUTH_CLIENT_ID` and `TS_OAUTH_SECRET` using a Tailscale OAuth client with writable `auth_keys` scope and permission for `tag:ci`. The tag must exist and be permitted in the tailnet policy. Run the workflow from Actions > Tailscale connectivity > Run workflow. Optionally provide a Tailscale IP or MagicDNS hostname to verify connectivity. This workflow does not deploy or expose the VPS.
+
+### Interactive Tailscale setup on the VPS
+
+Run `bash scripts/tailscale-github-setup.sh` in an interactive SSH terminal (as `ubuntu`, or as `root` with automatic switch to the GitHub-authenticated `ubuntu` account). The terminal wizard guides OAuth client creation, securely prompts for credentials, stores them via `gh secret set` without writing a credentials file, checks GitHub secret names, and triggers/checks the Tailscale connectivity workflow.
