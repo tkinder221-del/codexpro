@@ -25,9 +25,11 @@ jobs:
           registry-url: https://registry.npmjs.org
       - name: Validate tag and package version
         shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
         run: |
           expected="v$(node -p "require('./package.json').version")"
-          test "${{ inputs.tag }}" = "$expected"
+          test "$RELEASE_TAG" = "$expected"
           git tag --points-at HEAD | grep -Fx "$expected"
       - run: npm ci
       - run: npm run release:guard
