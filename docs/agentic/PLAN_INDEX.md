@@ -98,3 +98,7 @@ Plans 38–46 shipped in GitHub Release v0.33.0 from commit `97cb4fb36a75eb345b8
 - MCP protocol/Tasks/interactive-approval evolution is research-only until stable client support creates a concrete benefit over current primitives.
 - Existing Docker support stays optional and frozen at proven scope until a concrete need justifies reopening it.
 - Plans describe intended future work; source + tests + current runtime evidence determine what actually exists.
+
+## Proposed: Codex-config MCP interoperability (2026-11-15)
+
+A new opt-in downstream MCP bridge is proposed for Codex-configured servers. **Planning only**, no runtime integration or release yet. The implementation/security acceptance criteria and operator approval gate are in [the plan](../superpowers/plans/2026-11-15-codex-mcp-interop.md). Default off; no Codex CLI; preserve tunnel/runtime and existing authorized workspace boundaries.
