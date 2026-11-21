@@ -54,19 +54,19 @@ Before announcing broadly:
 Suggested golden prompts:
 
 ```text
-Use CodexPro. Call server_config, then open_current_workspace with include_tree=false. Read README.md and summarize the project without editing files.
+Dawid. Call server_config, then open_current_workspace with include_tree=false. Read README.md and summarize the project without editing files.
 ```
 
 ```text
-Use CodexPro. Create a small static site from PRODUCT.md by writing index.html, styles.css, and README.md. Verify with one targeted search.
+Dawid. Create a small static site from PRODUCT.md by writing index.html, styles.css, and README.md. Verify with one targeted search.
 ```
 
 ```text
-Use CodexPro. Try to read .env. Explain why the request is blocked.
+Dawid. Try to read .env. Explain why the request is blocked.
 ```
 
 ```text
-Use CodexPro. Run bash with pwd, then run bash with a blocked command. Report both outcomes.
+Dawid. Run bash with pwd, then run bash with a blocked command. Report both outcomes.
 ```
 
 ## Security Gate

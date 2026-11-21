@@ -10,3 +10,5 @@ const parsed = JSON.parse(fs.readFileSync(packagePath, "utf8")) as PackageIdenti
 
 export const CODEXPRO_PACKAGE_NAME = typeof parsed.name === "string" ? parsed.name : "codexpro-full";
 export const CODEXPRO_VERSION = typeof parsed.version === "string" ? parsed.version : "unknown";
+
+export const CODEXPRO_MCP_NAME = "Dawid";

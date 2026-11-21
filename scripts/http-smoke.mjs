@@ -298,6 +298,9 @@ try {
     throw new Error(`expected authenticated healthz to return 200, got ${authorized.status}`);
   }
   const authorizedJson = await authorized.json();
+  if (authorizedJson.name !== 'Dawid') {
+    throw new Error(`healthz must advertise Dawid, got ${JSON.stringify(authorizedJson.name)}`);
+  }
   if (authorizedJson.authRequired !== true) {
     throw new Error(`expected authenticated healthz to report authRequired=true, got ${JSON.stringify(authorizedJson)}`);
   }

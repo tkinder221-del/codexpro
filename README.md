@@ -133,7 +133,7 @@ If you already have a verified fork tarball, install that tarball directly inste
 5. In chat, start with:
 
    ```text
-   Use CodexPro. Call server_config, then open_current_workspace with include_tree=false.
+   Dawid. Call server_config, then open_current_workspace with include_tree=false.
    ```
 
 For a workspace opened with `open_workspace`, keep its returned `workspace_id`. Implicit workspace selection is intentionally MCP-session-local, so pass `workspace_id` explicitly after ChatGPT/HTTP MCP session turnover.

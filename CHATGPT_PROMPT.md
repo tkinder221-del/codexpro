@@ -1,4 +1,4 @@
-Use CodexPro.
+Dawid.
 
 Call server_config first, then open_current_workspace with include_tree=false.
 Do not call open_workspace after open_current_workspace unless I ask you to switch roots. If you do open another workspace, keep its returned workspace_id and pass it explicitly across later ChatGPT/HTTP MCP session turnover.

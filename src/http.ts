@@ -7,7 +7,7 @@ import { z } from "zod";
 import { createHttpTransportCompat, isInitializeRequestCompat } from "./mcpCompat.js";
 import type { NodeStreamableHTTPServerTransport } from "@modelcontextprotocol/node";
 import { expandHome, loadConfig, type CodexProConfig } from "./config.js";
-import { CODEXPRO_PACKAGE_NAME, CODEXPRO_VERSION } from "./packageIdentity.js";
+import { CODEXPRO_MCP_NAME, CODEXPRO_PACKAGE_NAME, CODEXPRO_VERSION } from "./packageIdentity.js";
 import { buildIdentity } from "./buildIdentity.js";
 import {
   profilePathForRoot,
@@ -2109,7 +2109,7 @@ async function main(): Promise<void> {
   app.get("/healthz", (_req, res) => {
     res.json({
       ok: true,
-      name: "CodexPro",
+      name: CODEXPRO_MCP_NAME,
       packageName: CODEXPRO_PACKAGE_NAME,
       version: CODEXPRO_VERSION,
       build: buildIdentity(),

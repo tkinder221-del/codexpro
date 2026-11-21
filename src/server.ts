@@ -12,7 +12,7 @@ import { createMutationCheckpoint, finalizeMutationCheckpoint, restoreCheckpoint
 import { runHooks } from "./hooks/runner.js";
 import { z } from "zod";
 import type { CodexProConfig } from "./config.js";
-import { CODEXPRO_PACKAGE_NAME, CODEXPRO_VERSION } from "./packageIdentity.js";
+import { CODEXPRO_MCP_NAME, CODEXPRO_PACKAGE_NAME, CODEXPRO_VERSION } from "./packageIdentity.js";
 import { buildIdentity } from "./buildIdentity.js";
 import { classifyExecutionHint, executionHintPublic } from "./executionGuidance.js";
 import { WorkspaceManager, PathGuard, CodexProError, type Workspace, type WorkspaceRegistry } from "./guard.js";
@@ -770,7 +770,8 @@ export function serverInstructions(config: CodexProConfig): string {
       : "3. Inspect with tree, search, and read. Do not use bash for git status, git diff, cat, sed, grep, rg, find, ls, or file reading.";
 
   return [
-    "CodexPro connects ChatGPT to explicitly allowed local development workspaces.",
+    `${CODEXPRO_MCP_NAME} connects ChatGPT to explicitly allowed local development workspaces.`,
+    `When the user starts a ChatGPT request with "${CODEXPRO_MCP_NAME.toLowerCase()}", use this connection for the requested workspace operation.`,
     "",
     "Preferred workflow:",
     "1. Start with open_current_workspace. Use open_workspace only when the user gives a different allowed root or asks to switch projects; that selection stays active for this MCP session.",
@@ -1433,7 +1434,7 @@ export function createCodexProServer(
         operationManager: operationManagerFor(workspace)
       })
     );
-  const server = new McpServer({ name: "CodexPro", version: CODEXPRO_VERSION }, { instructions: serverInstructions(config) });
+  const server = new McpServer({ name: CODEXPRO_MCP_NAME, version: CODEXPRO_VERSION }, { instructions: serverInstructions(config) });
   const originalServerClose = server.close.bind(server);
   let serverClosing = false;
   (server as any).close = async () => {
@@ -1561,9 +1562,9 @@ export function createCodexProServer(
     server,
     SUPERTOOL_NAME,
     {
-      title: "CodexPro Supertool",
+      title: `${CODEXPRO_MCP_NAME} Supertool`,
       description:
-        "Stable mixed-capability wrapper for advanced ChatGPT connector setups. Pass action plus args to call an already-registered CodexPro tool without changing the visible schema; it cannot call tools disabled by the current mode. Because the selected action determines whether a call is read-only, local-mutating, or open-world, this wrapper intentionally omits static safety annotations; prefer explicit tools when precise per-action annotations matter.",
+        `Use this wrapper for requests directed to ${CODEXPRO_MCP_NAME} when a single tool is needed. Pass action plus args to call an already-registered CodexPro tool without changing the visible schema; it cannot call tools disabled by the current mode. Because the selected action determines whether a call is read-only, local-mutating, or open-world, this wrapper intentionally omits static safety annotations; prefer explicit tools when precise per-action annotations matter.`,
       inputSchema: {
         action: z.string().optional().describe("Action or registered tool name. Use list_actions to see what this server mode allows."),
         args: z.record(z.string(), z.any()).optional().describe("Arguments for the selected action. Same shape as the wrapped CodexPro tool.")

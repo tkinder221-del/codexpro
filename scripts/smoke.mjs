@@ -242,6 +242,9 @@ const safeInitialize = await client.request('initialize', {
   clientInfo: { name: 'codexpro-smoke', version: '0.1.0' }
 });
 client.notify('notifications/initialized');
+if (safeInitialize.serverInfo?.name !== 'Dawid' || !safeInitialize.instructions?.includes('"dawid"')) {
+  throw new Error('MCP initialize must advertise Dawid and its ChatGPT invocation cue.');
+}
 if (safeInitialize.serverInfo?.version !== pkg.version) throw new Error(`MCP serverInfo version drifted from package version: ${JSON.stringify(safeInitialize.serverInfo)}`);
 if (!safeInitialize.instructions?.includes('allowlisted verification commands') || safeInitialize.instructions?.includes('Full Bash access is enabled')) {
   throw new Error(`safe Bash instructions were not mode-appropriate: ${safeInitialize.instructions}`);

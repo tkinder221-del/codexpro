@@ -21,7 +21,7 @@ codexpro start
 In ChatGPT:
 
 ```text
-Use CodexPro. Call server_config, then open_current_workspace with include_tree=false.
+Dawid. Call server_config, then open_current_workspace with include_tree=false.
 Inspect the relevant files, make only the requested changes, verify them, and show the final diff.
 ```
 

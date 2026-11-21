@@ -104,8 +104,10 @@ In ChatGPT, open the custom app/MCP connection UI (labels can vary by plan/clien
 Then start a chat with a bounded discovery prompt such as:
 
 ```text
-Use CodexPro. Call server_config, then open_current_workspace with include_tree=false.
+Dawid, call server_config, then open_current_workspace with include_tree=false.
 ```
+
+Name this custom app **Dawid** in ChatGPT. If plain text selects the wrong connection, select **Dawid** in the app picker or use `@Dawid` if your client offers it. The installed CLI remains `codexpro`.
 
 When `open_workspace` returns a `workspace_id`, keep using that ID explicitly after MCP/session turnover.
 
